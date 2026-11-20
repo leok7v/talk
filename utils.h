@@ -12,6 +12,7 @@ const char * option_unknown(const char * const * options,
                             const char * known);
 double seconds(void);
 const uint8_t * file_map(const char * path, size_t * size);
+uint8_t * file_shared(const char * path, size_t size);
 void file_unmap(const uint8_t * data, size_t size);
 bool model_path(char * path, size_t size, const char * pack);
 float * floats(size_t count);

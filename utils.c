@@ -95,6 +95,18 @@ const uint8_t * file_map(const char * path, size_t * size) {
     return data != MAP_FAILED ? data : NULL;
 }
 
+uint8_t * file_shared(const char * path, size_t size) {
+    const int fd = open(path, O_RDWR | O_CREAT, 0600);
+    void * data = MAP_FAILED;
+    if (fd >= 0 && ftruncate(fd, (off_t)size) == 0) {
+        data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    }
+    if (fd >= 0) {
+        close(fd);
+    }
+    return data != MAP_FAILED ? data : NULL;
+}
+
 void file_unmap(const uint8_t * data, size_t size) {
     if (data != NULL) {
         munmap((void *)(uintptr_t)data, size);

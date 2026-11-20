@@ -7,6 +7,7 @@ enum { GGUF_OWNED = 1024, GGUF_BLOCK = 32, GGUF_F32 = 0, GGUF_Q4_0 = 2,
        MARK_REPLY = 2, SAMPLER_STEPS = 32, SAMPLER_TOKENS = 1024,
        SAMPLER_CHOICES = 8, SAMPLER_TERMS = 8, SAMPLER_TEXT = 256,
        SAMPLER_BANNED = 32, SAMPLER_MARK = 5, CHAT_ROWS = 256,
+       CHAT_HEAD = 4096, CHAT_TRACKS = 64,
        STEP_END = 0, STEP_FIXED = 1, STEP_SENTENCES = 2, STEP_CHOICE = 3,
        STEP_FREE = 4 };
 
@@ -53,6 +54,30 @@ struct mark {
     uint8_t * state;
 };
 
+struct store {
+    size_t state_size;
+    int32_t tracks;
+    int32_t width;
+    uint64_t model;
+    const char * path;
+};
+
+struct stored {
+    uint32_t magic;
+    uint32_t clean;
+    uint64_t model;
+    uint64_t state_size;
+    int32_t tracks;
+    int32_t width;
+    int32_t context;
+    int32_t pending_count;
+    int32_t fed_count;
+    int32_t start_count;
+    int32_t dropped;
+    int32_t mode;
+    int32_t wanted[CHAT_MARKS];
+};
+
 struct chat {
     void * engine;
     void (* forward)(void * engine, const int32_t * tokens, int32_t count,
@@ -73,9 +98,16 @@ struct chat {
     int32_t counted;
     int32_t kept;
     bool counting;
-    int32_t starts[CHAT_STARTS];
+    int32_t * starts;
     int32_t start_count;
     struct mark marks[CHAT_MARKS];
+    struct store store;
+    struct stored * stored;
+    uint8_t * slot;
+    float * track[CHAT_TRACKS];
+    size_t head;
+    int32_t synced;
+    int32_t mode;
 };
 
 struct attention {
@@ -101,7 +133,11 @@ struct format {
 
 void chat_attend(const struct attention * a, float * mix, const float * q,
                  int32_t first, int32_t rows);
-bool chat_open(struct chat * c, int32_t context, size_t state_size);
+bool chat_open(struct chat * c, int32_t context, const struct store * s);
+void chat_resume(struct chat * c);
+void chat_commit(struct chat * c);
+bool chat_save(struct chat * c, const char * path);
+bool chat_load(struct chat * c, const char * path);
 void chat_close(struct chat * c);
 void chat_clear(struct chat * c);
 void chat_token(struct chat * c, int32_t token);

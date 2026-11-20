@@ -95,6 +95,7 @@ and prints the known options.
 | `gemm=` | `blas` | the backend: `blas`, `cpu`, or `metal` or `hip` for a GPU |
 | `asr=` `llm=` `tts=` | the first installed | the engine of a role |
 | `context=` | `16384` | the context of the chat model, in tokens |
+| `state=` | none | a file that keeps a Falcon chat between runs |
 | `temperature=` | `0.6` | the sampler; 0 is the greedy decode |
 | `top_k=` `top_p=` | `20` `0.95` | the sampler |
 | `presence=` `dry=` | `0` `0.8` | the penalties for a repeat |

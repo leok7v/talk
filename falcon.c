@@ -71,6 +71,8 @@ static void layer_open(struct falcon * self, int32_t l) {
         .state = floats((size_t)INNER * STATE),
         .conv = floats((size_t)XBC * (CONV - 1))
     };
+    self->chat.track[2 * l] = self->layers[l].keys;
+    self->chat.track[2 * l + 1] = self->layers[l].values;
 }
 
 static float silu(float x) {
@@ -245,17 +247,10 @@ static void state_shift(void * engine, int32_t keep, int32_t count,
                         int32_t rows) {
     struct falcon * self = engine;
     const size_t row = (size_t)GROUPS * HEAD * sizeof(float);
-    for (int32_t l = 0; l < LAYERS; l++) {
-        float * k = self->layers[l].keys;
-        float * v = self->layers[l].values;
-        if (k != NULL) {
-            memmove(k + keep * GROUPS * HEAD,
-                    k + (keep + count) * GROUPS * HEAD,
-                    (size_t)(rows - keep - count) * row);
-            memmove(v + keep * GROUPS * HEAD,
-                    v + (keep + count) * GROUPS * HEAD,
-                    (size_t)(rows - keep - count) * row);
-        }
+    for (int32_t t = 0; t < LAYERS * 2; t++) {
+        float * at = self->chat.track[t] + (size_t)keep * GROUPS * HEAD;
+        memmove(at, at + (size_t)count * GROUPS * HEAD,
+                (size_t)(rows - keep - count) * row);
     }
 }
 
@@ -449,9 +444,30 @@ static int32_t falcon_reply(struct llm * llm, char * text, int32_t capacity,
     }
     text[size] = 0;
     reply_end(self, text);
+    c->mode = self->tools != NULL ? 1 : 0;
+    chat_commit(c);
     free(logits);
     free(s);
     return count;
+}
+
+static void tools_resume(struct falcon * self) {
+    if (self->chat.mode != 0 && self->tools == NULL) {
+        self->tools = strdup("");
+    }
+}
+
+static bool falcon_save(struct llm * llm, const char * path) {
+    return chat_save(&((struct falcon *)llm)->chat, path);
+}
+
+static bool falcon_take(struct llm * llm, const char * path) {
+    struct falcon * self = (struct falcon *)llm;
+    const bool taken = chat_load(&self->chat, path);
+    if (taken) {
+        tools_resume(self);
+    }
+    return taken;
 }
 
 static void falcon_close(struct llm * llm) {
@@ -495,7 +511,8 @@ static struct falcon * falcon_new(void) {
             .name = "falcon", .reset = falcon_reset,
             .message = falcon_message, .count = falcon_count,
             .room = falcon_room, .reply = falcon_reply,
-            .rewind = falcon_rewind, .close = falcon_close
+            .rewind = falcon_rewind, .save = falcon_save,
+            .load = falcon_take, .close = falcon_close
         };
         self->chat.engine = self;
         self->chat.forward = state_forward;
@@ -514,14 +531,23 @@ static struct llm * falcon_open(const char * path, struct backend * backend,
     const bool packed = strcmp(weights, "packed") == 0;
     const bool valid = (packed || strcmp(weights, "float") == 0) &&
                        context >= 256 && context <= 262144;
-    const size_t state = ((size_t)LAYERS * (INNER * STATE + XBC * (CONV - 1)) +
-                          DIM) * sizeof(float);
+    struct store store = {
+        .state_size = ((size_t)LAYERS * (INNER * STATE + XBC * (CONV - 1)) +
+                       DIM) * sizeof(float),
+        .tracks = LAYERS * 2, .width = GROUPS * HEAD,
+        .path = option(options, "state", NULL)
+    };
     struct falcon * self = valid ? falcon_new() : NULL;
-    const bool mapped = self != NULL &&
-                        chat_open(&self->chat, context, state) &&
-                        gguf_open(&self->gguf, path, backend, packed);
+    bool mapped = self != NULL && gguf_open(&self->gguf, path, backend,
+                                            packed);
+    if (mapped) {
+        store.model = self->gguf.size;
+        mapped = chat_open(&self->chat, context, &store);
+    }
     if (mapped) {
         falcon_load(self);
+        chat_resume(&self->chat);
+        tools_resume(self);
     }
     const bool ready = mapped && self->gguf.faults == 0;
     if (!ready && self != NULL) {
@@ -533,7 +559,7 @@ static struct llm * falcon_open(const char * path, struct backend * backend,
 INSTALL(llm, falcon,
         .pack = "leok7v/Falcon-H1-Tiny-Tool-Calling-90M-GGUF/"
                 "Falcon-H1-Tiny-90M-Tool-Calling-Q8_0.gguf",
-        .keys = "weights context", .open = falcon_open)
+        .keys = "weights context state", .open = falcon_open)
 
 #ifndef NO_MAIN
 

@@ -617,21 +617,149 @@ void chat_attend(const struct attention * a, float * mix, const float * q,
     free(score);
 }
 
-bool chat_open(struct chat * c, int32_t context, size_t state_size) {
+static const uint32_t stored_magic = 0x54414c4b;
+
+static size_t row_bytes(const struct chat * c) {
+    return (size_t)c->store.tracks * c->store.width * sizeof(float);
+}
+
+static size_t chat_place(struct chat * c, uint8_t * base) {
+    const size_t fed = CHAT_HEAD + (size_t)c->capacity * sizeof(int32_t);
+    const size_t starts = fed + (size_t)c->context * sizeof(int32_t);
+    const size_t slot = starts + CHAT_STARTS * sizeof(int32_t);
+    if (base != NULL) {
+        c->stored = (struct stored *)(void *)base;
+        c->pending = (int32_t *)(void *)(base + CHAT_HEAD);
+        c->fed = (int32_t *)(void *)(base + fed);
+        c->starts = (int32_t *)(void *)(base + starts);
+        c->slot = base + slot;
+    }
+    return (slot + c->store.state_size + CHAT_HEAD - 1) / CHAT_HEAD *
+           CHAT_HEAD;
+}
+
+static size_t file_bytes(const struct chat * c) {
+    return c->head + (size_t)c->context * row_bytes(c);
+}
+
+static bool stored_fits(const struct chat * c, const struct stored * h) {
+    return h->magic == stored_magic && h->clean == 1 &&
+           h->model == c->store.model && h->context == c->context &&
+           h->state_size == c->store.state_size &&
+           h->tracks == c->store.tracks && h->width == c->store.width;
+}
+
+static void stored_take(struct chat * c) {
+    const struct stored * h = c->stored;
+    c->pending_count = h->pending_count;
+    c->fed_count = h->fed_count;
+    c->start_count = h->start_count;
+    c->dropped = h->dropped;
+    c->mode = h->mode;
+    for (int32_t i = 0; i < CHAT_MARKS; i++) {
+        c->marks[i].position = -1;
+        c->marks[i].wanted = h->wanted[i];
+    }
+}
+
+static void rows_move(struct chat * c, uint8_t * file, int32_t first,
+                      int32_t last, bool out) {
+    const size_t wide = (size_t)c->store.width * sizeof(float);
+    for (int32_t i = first * c->store.tracks; i < last * c->store.tracks;
+         i++) {
+        const int32_t t = i % c->store.tracks;
+        uint8_t * at = file + c->head + (size_t)i * wide;
+        float * live = c->track[t] + (size_t)(i / c->store.tracks) *
+                       c->store.width;
+        memcpy(out ? (void *)at : (void *)live,
+               out ? (const void *)live : (const void *)at, wide);
+    }
+}
+
+bool chat_open(struct chat * c, int32_t context, const struct store * s) {
     int32_t made = 0;
     c->context = context;
     c->capacity = 2 * context;
+    c->store = *s;
+    c->head = chat_place(c, NULL);
+    uint8_t * base = s->path != NULL ? file_shared(s->path, file_bytes(c)) :
+                     calloc(1, c->head);
     c->scratch = calloc((size_t)c->capacity, sizeof(int32_t));
-    c->pending = calloc((size_t)c->capacity, sizeof(int32_t));
-    c->fed = calloc((size_t)context, sizeof(int32_t));
     for (int32_t i = 0; i < CHAT_MARKS; i++) {
         c->marks[i] = (struct mark){
-            .position = -1, .wanted = -1, .state = malloc(state_size)
+            .position = -1, .wanted = -1, .state = malloc(s->state_size)
         };
         made += c->marks[i].state != NULL ? 1 : 0;
     }
-    return made == CHAT_MARKS && c->scratch != NULL && c->pending != NULL &&
-           c->fed != NULL;
+    if (base != NULL) {
+        chat_place(c, base);
+    }
+    if (base != NULL && stored_fits(c, c->stored)) {
+        stored_take(c);
+    } else if (base != NULL) {
+        *c->stored = (struct stored){
+            .magic = stored_magic, .clean = 1, .model = s->model,
+            .state_size = s->state_size, .tracks = s->tracks,
+            .width = s->width, .context = context, .wanted = { -1, -1, -1 }
+        };
+    }
+    return made == CHAT_MARKS && c->scratch != NULL && base != NULL &&
+           s->tracks <= CHAT_TRACKS;
+}
+
+void chat_resume(struct chat * c) {
+    if (c->fed_count > 0) {
+        rows_move(c, (uint8_t *)c->stored, 0, c->fed_count, false);
+        c->load(c->engine, c->slot);
+    }
+    c->synced = c->fed_count;
+}
+
+void chat_commit(struct chat * c) {
+    struct stored * h = c->stored;
+    h->clean = 0;
+    c->save(c->engine, c->slot);
+    if (c->store.path != NULL && c->synced < c->fed_count) {
+        rows_move(c, (uint8_t *)h, c->synced, c->fed_count, true);
+    }
+    c->synced = c->fed_count;
+    h->pending_count = c->pending_count;
+    h->fed_count = c->fed_count;
+    h->start_count = c->start_count;
+    h->dropped = c->dropped;
+    h->mode = c->mode;
+    for (int32_t i = 0; i < CHAT_MARKS; i++) {
+        h->wanted[i] = c->marks[i].wanted;
+    }
+    h->clean = 1;
+}
+
+bool chat_save(struct chat * c, const char * path) {
+    uint8_t * to = file_shared(path, file_bytes(c));
+    chat_commit(c);
+    if (to != NULL) {
+        memcpy(to, c->stored, c->head);
+        rows_move(c, to, 0, c->fed_count, true);
+        file_unmap(to, file_bytes(c));
+    }
+    return to != NULL;
+}
+
+bool chat_load(struct chat * c, const char * path) {
+    size_t size = 0;
+    const uint8_t * from = file_map(path, &size);
+    const struct stored * h = (const struct stored *)(const void *)from;
+    const bool fine = from != NULL && size >= file_bytes(c) &&
+                      stored_fits(c, h);
+    if (fine) {
+        memcpy(c->stored, from, c->head);
+        stored_take(c);
+        rows_move(c, (uint8_t *)(uintptr_t)from, 0, c->fed_count, false);
+        c->load(c->engine, c->slot);
+        c->synced = 0;
+    }
+    file_unmap(from, size);
+    return fine;
 }
 
 void chat_close(struct chat * c) {
@@ -639,8 +767,11 @@ void chat_close(struct chat * c) {
         free(c->marks[i].state);
     }
     free(c->scratch);
-    free(c->pending);
-    free(c->fed);
+    if (c->store.path != NULL) {
+        file_unmap((const uint8_t *)c->stored, file_bytes(c));
+    } else {
+        free(c->stored);
+    }
 }
 
 void chat_clear(struct chat * c) {
@@ -706,6 +837,7 @@ static void marks_restore(struct chat * c, int32_t same) {
     }
     c->load(c->engine, best != NULL ? best->state : NULL);
     c->fed_count = best != NULL ? best->position : 0;
+    c->synced = c->synced < c->fed_count ? c->synced : c->fed_count;
     c->dropped = best != NULL ? best->dropped : 0;
     for (int32_t i = 0; i < CHAT_MARKS; i++) {
         struct mark * m = &c->marks[i];
@@ -847,6 +979,7 @@ static bool fed_through(const struct chat * c, int32_t end) {
 
 static void fed_cut(struct chat * c, int32_t keep, int32_t count) {
     c->shift(c->engine, keep, count, c->fed_count);
+    c->synced = c->synced < keep ? c->synced : keep;
     memmove(c->fed + keep, c->fed + keep + count,
             (size_t)(c->fed_count - keep - count) * sizeof(int32_t));
     c->fed_count -= count;
@@ -886,6 +1019,7 @@ bool chat_fit(struct chat * c, struct turn * turn) {
     const bool soft = turn->shift == SHIFT_SOFT && count > 0 &&
                       system->position == keep &&
                       fed_through(c, keep + count);
+    c->stored->clean = 0;
     turn->dropped = 0;
     turn->full = c->overflow ||
                  (tight && (turn->shift == SHIFT_NONE || count == 0));

@@ -303,17 +303,65 @@ static void pending_make(struct chat * c) {
     }
 }
 
+static float fake_rows[2][3 * 1024];
+
+static struct chat * fake_chat(struct chat * c, struct fake * f) {
+    *c = (struct chat){
+        .engine = f, .forward = fake_forward, .shift = fake_shift,
+        .save = fake_save, .load = fake_load,
+        .track = { fake_rows[0], fake_rows[1] }
+    };
+    memset(fake_rows, 0, sizeof fake_rows);
+    return c;
+}
+
+static void stored_test(const struct store * store) {
+    static struct chat c;
+    struct fake f = { .ordered = true };
+    struct store other = *store;
+    must(chat_open(fake_chat(&c, &f), 1024, store), "chat");
+    chat_resume(&c);
+    expect(c.fed_count == TOKENS && c.pending_count == TOKENS &&
+           f.loads == 1 && f.next == TOKENS &&
+           c.track[1][3 * TOKENS - 1] == 3.5f,
+           "a mapped chat comes back");
+    chat_token(&c, 2000);
+    chat_feed(&c);
+    expect(f.runs == 1 && f.row[0] == TOKENS && f.count[0] == 1,
+           "a chat that came back feeds only the new token");
+    c.stored->clean = 0;
+    chat_close(&c);
+    must(chat_open(fake_chat(&c, &f), 1024, store), "chat");
+    expect(c.fed_count == 0 && c.pending_count == 0,
+           "a chat that was not committed starts empty");
+    chat_close(&c);
+    other.path = NULL;
+    must(chat_open(fake_chat(&c, &f), 1024, &other), "chat");
+    expect(chat_load(&c, "test.copy") && c.fed_count == TOKENS &&
+           c.track[1][3 * TOKENS - 1] == 3.5f && f.next == TOKENS,
+           "chat_load takes a saved chat");
+    other.model = 8;
+    chat_close(&c);
+    must(chat_open(fake_chat(&c, &f), 1024, &other), "chat");
+    expect(!chat_load(&c, "test.copy") && c.fed_count == 0,
+           "chat_load refuses the chat of another model");
+    chat_close(&c);
+    remove("test.state");
+    remove("test.copy");
+}
+
 static void feed_test(void) {
     static struct chat c;
     struct fake f = { .ordered = true };
+    const struct store store = {
+        .state_size = sizeof f.next, .tracks = 2, .width = 3, .model = 7,
+        .path = "test.state"
+    };
     const int32_t want[] = { 10, 256, 44, 5, 2 };
     bool same = true;
-    c.engine = &f;
-    c.forward = fake_forward;
-    c.shift = fake_shift;
-    c.save = fake_save;
-    c.load = fake_load;
-    must(chat_open(&c, 1024, sizeof f.next), "chat");
+    fake_chat(&c, &f);
+    remove("test.state");
+    must(chat_open(&c, 1024, &store), "chat");
     pending_make(&c);
     chat_feed(&c);
     for (int32_t i = 0; i < 5; i++) {
@@ -331,7 +379,12 @@ static void feed_test(void) {
            f.count[5] == 5 && f.count[6] == 2, "feed again from a mark");
     expect(f.ordered && c.fed_count == TOKENS && c.kept == 310,
            "feed order after a load");
+    c.track[1][3 * TOKENS - 1] = 3.5f;
+    c.synced = 0;
+    chat_commit(&c);
+    expect(chat_save(&c, "test.copy"), "chat_save");
     chat_close(&c);
+    stored_test(&store);
 }
 
 static void attend_test(void) {

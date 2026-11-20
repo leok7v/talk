@@ -582,11 +582,13 @@ static struct llm * qwen_open(const char * path, struct backend * backend,
     const bool packed = strcmp(weights, "packed") == 0;
     const bool valid = (packed || strcmp(weights, "float") == 0) &&
                        context >= 256 && context <= 262144;
-    const size_t state = (LAYERS - LAYERS / INTERVAL) * state_bytes() +
-                         DIM * sizeof(float);
+    const struct store store = {
+        .state_size = (LAYERS - LAYERS / INTERVAL) * state_bytes() +
+                      DIM * sizeof(float)
+    };
     struct qwen * self = valid ? qwen_new() : NULL;
     const bool mapped = self != NULL &&
-                        chat_open(&self->chat, context, state) &&
+                        chat_open(&self->chat, context, &store) &&
                         gguf_open(&self->gguf, path, backend, packed);
     if (mapped) {
         qwen_load(self);

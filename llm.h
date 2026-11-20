@@ -43,6 +43,8 @@ struct llm {
     int32_t (* reply)(struct llm * llm, char * text, int32_t capacity,
                       struct turn * turn);
     void (* rewind)(struct llm * llm, int32_t messages);
+    bool (* save)(struct llm * llm, const char * path);
+    bool (* load)(struct llm * llm, const char * path);
     void (* close)(struct llm * llm);
 };
 
