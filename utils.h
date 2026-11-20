@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 void must(bool ok, const char * what);
+const char * guarded(void (* run)(void * context), void * context);
 const char * option(const char * const * options, const char * key,
                     const char * fallback);
 bool option_listed(const char * known, const char * word, size_t n);

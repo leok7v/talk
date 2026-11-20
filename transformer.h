@@ -1,7 +1,8 @@
 #pragma once
 #include "llm.h"
 
-enum { GGUF_OWNED = 1024, GGUF_BLOCK = 32, GGUF_F32 = 0, GGUF_Q8_0 = 8,
+enum { GGUF_OWNED = 1024, GGUF_BLOCK = 32, GGUF_F32 = 0, GGUF_Q4_0 = 2,
+       GGUF_Q8_0 = 8,
        CHAT_MARKS = 3, CHAT_STARTS = 4096, MARK_SYSTEM = 0, MARK_USER = 1,
        MARK_REPLY = 2, SAMPLER_STEPS = 32, SAMPLER_TOKENS = 1024,
        SAMPLER_CHOICES = 8, SAMPLER_TERMS = 8, SAMPLER_TEXT = 256,
@@ -13,6 +14,7 @@ struct matrix {
     const float * values;
     const uint8_t * blocks;
     const float * scale;
+    int32_t bits;
 };
 
 struct table {
@@ -175,7 +177,10 @@ bool gguf_open(struct gguf * g, const char * path, struct backend * backend,
 void gguf_close(struct gguf * g);
 const uint8_t * gguf_info(struct gguf * g, const char * name, uint32_t * type,
                           uint64_t * count);
-void gguf_decode(float * out, const uint8_t * p, uint64_t count);
+void gguf_decode(float * out, const uint8_t * p, uint64_t count,
+                 uint32_t type);
+void gguf_row(float * out, const uint8_t * p, int32_t row, int32_t width,
+              uint32_t type);
 const float * gguf_tensor(struct gguf * g, const char * format, int32_t layer);
 struct matrix gguf_matrix(struct gguf * g, const char * format, int32_t layer);
 void gguf_linear(struct gguf * g, float * y, const float * x,
@@ -186,4 +191,6 @@ int32_t gguf_encode(const struct gguf * g, const char * s, int32_t * out,
 int32_t gguf_special(const struct gguf * g, const char * s, int32_t * out,
                      int32_t capacity);
 int32_t gguf_text(const struct gguf * g, char * text, int32_t used,
+                  int32_t capacity, int32_t token);
+int32_t gguf_mark(const struct gguf * g, char * text, int32_t used,
                   int32_t capacity, int32_t token);

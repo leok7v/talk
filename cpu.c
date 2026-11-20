@@ -124,25 +124,46 @@ static float block_dot(const uint8_t * restrict q,
                        const float * restrict x) {
     #pragma clang fp reassociate(on)
     float sum = 0.0f;
+    #pragma clang loop unroll(disable) vectorize(enable)
     for (int32_t i = 0; i < BLOCK; i++) {
         sum += (float)(int8_t)q[i] * x[i];
     }
     return sum;
 }
 
-void cpu_blocks(struct backend * backend, const struct blocks * w,
-                const float * x, float * y) {
+static float block_dot4(const uint8_t * restrict q,
+                        const float * restrict x) {
+    #pragma clang fp reassociate(on)
+    float sum = 0.0f;
+    #pragma clang loop unroll(disable) vectorize(enable)
+    for (int32_t i = 0; i < BLOCK / 2; i++) {
+        sum += (float)((int32_t)(q[i] & 15) - 8) * x[i] +
+               (float)((int32_t)(q[i] >> 4) - 8) * x[i + BLOCK / 2];
+    }
+    return sum;
+}
+
+void cpu_blocks_part(const struct blocks * w, const float * x, float * y,
+                     int32_t first, int32_t last) {
     const int32_t count = w->in / BLOCK;
-    (void)backend;
-    for (int32_t o = 0; o < w->out; o++) {
+    const size_t step = 2 + (size_t)BLOCK * w->bits / 8;
+    for (int32_t o = first; o < last; o++) {
         float sum = 0.0f;
         for (int32_t b = 0; b < count; b++) {
             const size_t at = (size_t)o * count + b;
-            sum += w->scale[at] * block_dot(w->codes + at * (BLOCK + 2) + 2,
-                                            x + b * BLOCK);
+            const uint8_t * q = w->codes + at * step + 2;
+            sum += w->scale[at] * (w->bits == 4 ?
+                                   block_dot4(q, x + b * BLOCK) :
+                                   block_dot(q, x + b * BLOCK));
         }
         y[o] = sum;
     }
+}
+
+void cpu_blocks(struct backend * backend, const struct blocks * w,
+                const float * x, float * y) {
+    (void)backend;
+    cpu_blocks_part(w, x, y, 0, w->out);
 }
 
 static void cpu_exp(struct backend * backend, float * y, const float * x,

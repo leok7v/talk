@@ -47,6 +47,35 @@ static void options_test(void) {
     expect(option_unknown(bad, "llm") == bad[1], "option_unknown");
 }
 
+static void guarded_fine(void * context) {
+    *(int32_t *)context += 1;
+    must(true, "nothing");
+}
+
+static void guarded_fault(void * context) {
+    *(int32_t *)context += 1;
+    must(false, "the inner call");
+    *(int32_t *)context += 100;
+}
+
+static void guarded_both(void * context) {
+    expect(guarded(guarded_fault, context) != NULL, "guarded inside");
+    must(false, "the outer call");
+}
+
+static void guarded_test(void) {
+    int32_t calls = 0;
+    const char * what = guarded(guarded_fine, &calls);
+    expect(what == NULL && calls == 1, "guarded with no fault");
+    what = guarded(guarded_fault, &calls);
+    expect(what != NULL && strcmp(what, "the inner call") == 0 && calls == 2,
+           "guarded returns the fault");
+    what = guarded(guarded_both, &calls);
+    expect(what != NULL && strcmp(what, "the outer call") == 0 && calls == 3,
+           "guarded in guarded");
+    expect(guarded(guarded_fine, &calls) == NULL, "guarded after a fault");
+}
+
 static void turn_test(void) {
     const char * const words[] = { "tokens=7", "temperature=0", "shift=soft",
                                    "script=S", NULL };
@@ -158,10 +187,13 @@ static void gemm_test(struct backend * backend) {
     free(want);
 }
 
-static void blocks_test(struct backend * backend, int32_t out) {
+static void blocks_test(struct backend * backend, int32_t out,
+                        int32_t bits) {
     const size_t page = (size_t)getpagesize();
     const size_t count = (size_t)out * (IN / BLOCK);
-    const size_t bytes = (count * (BLOCK + 2) + page - 1) / page * page;
+    const size_t step = 2 + (size_t)BLOCK * bits / 8;
+    const uint32_t type = bits == 4 ? GGUF_Q4_0 : GGUF_Q8_0;
+    const size_t bytes = (count * step + page - 1) / page * page;
     uint8_t * codes = NULL;
     float * scale = floats(count);
     float * row = floats(IN);
@@ -173,14 +205,14 @@ static void blocks_test(struct backend * backend, int32_t out) {
         codes[i] = (uint8_t)(i * 7 + i / 34);
     }
     for (size_t i = 0; i < count; i++) {
-        codes[i * (BLOCK + 2) + 1] = 0x38;
-        scale[i] = half_float(codes + i * (BLOCK + 2));
+        codes[i * step + 1] = 0x38;
+        scale[i] = half_float(codes + i * step);
     }
     const struct blocks w = { .codes = codes, .scale = scale, .out = out,
-                              .in = IN };
+                              .in = IN, .bits = bits };
     fill(x, IN, 3);
     for (int32_t o = 0; o < out; o++) {
-        gguf_decode(row, codes + (size_t)o * (IN / BLOCK) * (BLOCK + 2), IN);
+        gguf_row(row, codes, o, IN, type);
         for (int32_t i = 0; i < IN; i++) {
             want[o] += row[i] * x[i];
         }
@@ -201,8 +233,10 @@ static void backends_test(void) {
         struct backend * backend = backend_open(names[i], NULL);
         if (backend != NULL) {
             gemm_test(backend);
-            blocks_test(backend, 100);
-            blocks_test(backend, OUT);
+            blocks_test(backend, 100, 8);
+            blocks_test(backend, OUT, 8);
+            blocks_test(backend, 100, 4);
+            blocks_test(backend, OUT, 4);
             backend->close(backend);
         } else {
             printf("test: no backend %s here\n", names[i]);
@@ -346,6 +380,7 @@ static void attend_test(void) {
 
 int main(void) {
     options_test();
+    guarded_test();
     turn_test();
     bytes_test();
     json_test();

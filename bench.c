@@ -138,7 +138,7 @@ int main(int argc, char ** argv) {
     static char warm[TEXT];
     char keys[256];
     (void)argc;
-    snprintf(keys, sizeof keys, "llm gemm profile%s", turn_keys);
+    snprintf(keys, sizeof keys, "llm gemm model profile%s", turn_keys);
     options_must(options, keys);
     const char * name = option(options, "llm", NULL);
     const bool profile = option(options, "profile", NULL) != NULL;
@@ -151,8 +151,8 @@ int main(int argc, char ** argv) {
         .blocks = timed_blocks, .exp = timed_exp, .close = timed_close
     };
     timed.inner = backend;
-    struct llm * llm = llm_open(name, NULL, profile ? &timed.backend :
-                                backend, options);
+    struct llm * llm = llm_open(name, option(options, "model", NULL),
+                                profile ? &timed.backend : backend, options);
     must(llm != NULL, "llm");
     const double ready = seconds() - opened;
     text_make(llm, cold, "Once");

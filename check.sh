@@ -9,7 +9,7 @@ out=tmp/check/out.txt
 url=http://127.0.0.1:8081
 ./talk temperature=0 dry=0 "$@" >tmp/check/talk.log 2>&1 &
 pid=$!
-trap 'kill $pid 2>/dev/null' EXIT
+trap 'kill $pid 2>/dev/null; wait $pid 2>/dev/null' EXIT
 curl -s -o /dev/null --retry 60 --retry-connrefused --retry-delay 1 $url/health
 call() {
     name=$1

@@ -16,6 +16,8 @@ struct region {
 
 struct hip {
     struct backend backend;
+    void (* rest)(struct backend * backend, const struct blocks * w,
+                  const float * x, float * y);
     struct region regions[REGIONS];
 };
 
@@ -89,7 +91,8 @@ static bool launch(const struct region * r, const struct blocks * w) {
 static void hip_blocks(struct backend * backend, const struct blocks * w,
                        const float * x, float * y) {
     struct hip * h = (struct hip *)backend;
-    const struct region * r = w->out >= WIDE ? region_of(h, w) : NULL;
+    const struct region * r = w->out >= WIDE && w->bits == 8 ?
+                              region_of(h, w) : NULL;
     const bool done = r != NULL &&
         hipMemcpy(r->x, x, (size_t)w->in * sizeof(float),
                   hipMemcpyHostToDevice) == hipSuccess &&
@@ -97,7 +100,7 @@ static void hip_blocks(struct backend * backend, const struct blocks * w,
         hipMemcpy(y, r->y, (size_t)w->out * sizeof(float),
                   hipMemcpyDeviceToHost) == hipSuccess;
     if (!done) {
-        cpu_blocks(backend, w, x, y);
+        h->rest(backend, w, x, y);
     }
 }
 
@@ -115,6 +118,7 @@ static struct backend * hip_open(const char * const * options) {
     struct backend * blas = backend_open("blas", options);
     if (h != NULL && blas != NULL) {
         h->backend = *blas;
+        h->rest = blas->blocks;
         h->backend.name = "hip";
         h->backend.blocks = hip_blocks;
         h->backend.close = hip_close;

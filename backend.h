@@ -31,6 +31,7 @@ struct blocks {
     const float * scale;
     int32_t out;
     int32_t in;
+    int32_t bits;
 };
 
 struct backend {
@@ -58,3 +59,5 @@ void cpu_packed(struct backend * backend, const struct packed * w,
                 const float * x, float * y, int32_t rows);
 void cpu_blocks(struct backend * backend, const struct blocks * w,
                 const float * x, float * y);
+void cpu_blocks_part(const struct blocks * w, const float * x, float * y,
+                     int32_t first, int32_t last);

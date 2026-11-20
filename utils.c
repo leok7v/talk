@@ -1,6 +1,7 @@
 #include "llm.h"
 #include <fcntl.h>
 #include <math.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,11 +12,30 @@
 
 enum { RATE = 16000 };
 
+static _Thread_local jmp_buf * trap;
+static _Thread_local const char * failed;
+
 void must(bool ok, const char * what) {
     if (!ok) {
         fprintf(stderr, "talk: %s failed\n", what);
+        failed = what;
+        if (trap != NULL) {
+            longjmp(*trap, 1);
+        }
         exit(1);
     }
+}
+
+const char * guarded(void (* run)(void * context), void * context) {
+    jmp_buf * const outer = trap;
+    jmp_buf here;
+    failed = NULL;
+    if (setjmp(here) == 0) {
+        trap = &here;
+        run(context);
+    }
+    trap = outer;
+    return failed;
 }
 
 const char * option(const char * const * options, const char * key,

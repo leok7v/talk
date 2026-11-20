@@ -316,8 +316,7 @@ static void forward(struct qwen * self, const int32_t * tokens,
     float * n = x + size;
     float * y = n + size;
     for (int32_t r = 0; r < rows; r++) {
-        gguf_decode(x + r * DIM, self->embed + (size_t)tokens[r] *
-                    (DIM / GGUF_BLOCK) * (GGUF_BLOCK + 2), DIM);
+        gguf_row(x + r * DIM, self->embed, tokens[r], DIM, GGUF_Q8_0);
     }
     for (int32_t l = 0; l < LAYERS; l++) {
         const struct layer * m = &self->layers[l];
@@ -471,6 +470,10 @@ static int32_t generate(struct qwen * self, struct turn * turn, char * text,
         token = sampler_next(s, logits);
         if (going(c, turn, count, token) && !thought) {
             size = gguf_text(&self->gguf, text, size, capacity, token);
+            text[size] = 0;
+            if (turn->said != NULL) {
+                turn->said(turn->who, text, size);
+            }
         } else if (going(c, turn, count, token) && turn->thought != NULL &&
                    token != THINK_END) {
             noted = gguf_text(&self->gguf, turn->thought, noted,

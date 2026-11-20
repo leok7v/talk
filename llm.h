@@ -17,6 +17,7 @@ struct turn {
     char * thought;
     int32_t thought_capacity;
     bool (* alive)(void * who);
+    void (* said)(void * who, const char * text, int32_t size);
     void * who;
     int32_t shift;
     int32_t kept;

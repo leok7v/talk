@@ -174,14 +174,33 @@ const uint8_t * gguf_info(struct gguf * g, const char * name, uint32_t * type,
     return found;
 }
 
-void gguf_decode(float * out, const uint8_t * p, uint64_t count) {
-    for (uint64_t b = 0; b < count / GGUF_BLOCK; b++) {
-        const uint8_t * block = p + b * (GGUF_BLOCK + 2);
-        const float scale = half_float(block);
-        for (int32_t i = 0; i < GGUF_BLOCK; i++) {
-            out[b * GGUF_BLOCK + i] = scale * (float)(int8_t)block[2 + i];
-        }
+static size_t block_bytes(uint32_t type) {
+    return type == GGUF_Q4_0 ? 2 + GGUF_BLOCK / 2 : 2 + GGUF_BLOCK;
+}
+
+static void block_decode(float * out, const uint8_t * block, uint32_t type) {
+    const float scale = half_float(block);
+    const uint8_t * q = block + 2;
+    for (int32_t i = 0; i < GGUF_BLOCK && type == GGUF_Q8_0; i++) {
+        out[i] = scale * (float)(int8_t)q[i];
     }
+    for (int32_t i = 0; i < GGUF_BLOCK / 2 && type == GGUF_Q4_0; i++) {
+        out[i] = scale * (float)((int32_t)(q[i] & 15) - 8);
+        out[i + GGUF_BLOCK / 2] = scale * (float)((int32_t)(q[i] >> 4) - 8);
+    }
+}
+
+void gguf_decode(float * out, const uint8_t * p, uint64_t count,
+                 uint32_t type) {
+    for (uint64_t b = 0; b < count / GGUF_BLOCK; b++) {
+        block_decode(out + b * GGUF_BLOCK, p + b * block_bytes(type), type);
+    }
+}
+
+void gguf_row(float * out, const uint8_t * p, int32_t row, int32_t width,
+              uint32_t type) {
+    gguf_decode(out, p + (size_t)row * (width / GGUF_BLOCK) *
+                block_bytes(type), (uint64_t)width, type);
 }
 
 static void own(struct gguf * g, float * values) {
@@ -199,9 +218,9 @@ const float * gguf_tensor(struct gguf * g, const char * format,
     const uint8_t * p = gguf_info(g, name, &type, &count);
     if (p != NULL && type == GGUF_F32) {
         values = (const float *)(const void *)p;
-    } else if (p != NULL && type == GGUF_Q8_0) {
+    } else if (p != NULL && (type == GGUF_Q8_0 || type == GGUF_Q4_0)) {
         float * decoded = floats(count);
-        gguf_decode(decoded, p, count);
+        gguf_decode(decoded, p, count, type);
         values = decoded;
         own(g, decoded);
     } else {
@@ -218,19 +237,22 @@ struct matrix gguf_matrix(struct gguf * g, const char * format,
     struct matrix m = { 0 };
     snprintf(name, sizeof name, format, layer);
     const uint8_t * p = gguf_info(g, name, &type, &count);
-    const bool fine = p != NULL && type == GGUF_Q8_0;
-    float * values = floats(!fine ? 1 : g->packed ? count / GGUF_BLOCK :
-                            count);
-    own(g, values);
+    const bool fine = p != NULL && (type == GGUF_Q8_0 || type == GGUF_Q4_0);
+    float * scale = floats(fine ? count / GGUF_BLOCK : 1);
+    own(g, scale);
     g->faults += fine ? 0 : 1;
-    if (fine && g->packed) {
+    if (fine) {
         for (uint64_t b = 0; b < count / GGUF_BLOCK; b++) {
-            values[b] = half_float(p + b * (GGUF_BLOCK + 2));
+            scale[b] = half_float(p + b * block_bytes(type));
         }
         m.blocks = p;
-        m.scale = values;
-    } else if (fine) {
-        gguf_decode(values, p, count);
+        m.scale = scale;
+        m.bits = type == GGUF_Q4_0 ? 4 : 8;
+    }
+    if (fine && !g->packed) {
+        float * values = floats(count);
+        own(g, values);
+        gguf_decode(values, p, count, type);
         m.values = values;
     }
     return m;
@@ -244,9 +266,10 @@ void gguf_linear(struct gguf * g, float * y, const float * x,
         .lda = in, .ldb = in, .ldc = out, .tb = true
     };
     const struct blocks b = {
-        .codes = w->blocks, .scale = w->scale, .out = out, .in = in
+        .codes = w->blocks, .scale = w->scale, .out = out, .in = in,
+        .bits = w->bits
     };
-    if (w->values != NULL) {
+    if (w->values != NULL && rows > 1) {
         memset(y, 0, (size_t)rows * out * sizeof(float));
         g->backend->gemm(g->backend, &a);
     } else {
@@ -480,6 +503,15 @@ int32_t gguf_special(const struct gguf * g, const char * s, int32_t * out,
     return encode(g, s, out, capacity, true);
 }
 
+int32_t gguf_mark(const struct gguf * g, char * text, int32_t used,
+                  int32_t capacity, int32_t token) {
+    int32_t at = used;
+    for (int32_t i = 0; i < g->token_size[token] && at + 1 < capacity; i++) {
+        text[at++] = (char)g->token_text[token][i];
+    }
+    return at;
+}
+
 int32_t gguf_text(const struct gguf * g, char * text, int32_t used,
                   int32_t capacity, int32_t token) {
     const uint8_t * p = g->token_text[token];
@@ -498,11 +530,8 @@ int32_t gguf_text(const struct gguf * g, char * text, int32_t used,
         text[at++] = (char)c;
         i += wide ? 2 : 1;
     }
-    while (g->token_type[token] == 4 && i < g->token_size[token] &&
-           at + 1 < capacity) {
-        text[at++] = (char)p[i++];
-    }
-    return at;
+    return g->token_type[token] == 4 ?
+           gguf_mark(g, text, at, capacity, token) : at;
 }
 
 bool gguf_open(struct gguf * g, const char * path, struct backend * backend,

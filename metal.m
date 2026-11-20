@@ -46,6 +46,8 @@ struct region {
 
 struct metal {
     struct backend backend;
+    void (* rest)(struct backend * backend, const struct blocks * w,
+                  const float * x, float * y);
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
     id<MTLComputePipelineState> state;
@@ -89,7 +91,8 @@ static struct region * region_of(struct metal * m, const struct blocks * w) {
 static void metal_blocks(struct backend * backend, const struct blocks * w,
                          const float * x, float * y) {
     struct metal * m = (struct metal *)backend;
-    struct region * r = w->out >= WIDE ? region_of(m, w) : NULL;
+    struct region * r = w->out >= WIDE && w->bits == 8 ? region_of(m, w) :
+                        NULL;
     const uint32_t in = (uint32_t)w->in;
     if (r != NULL) {
         const NSUInteger wide = m->state.threadExecutionWidth;
@@ -110,7 +113,7 @@ static void metal_blocks(struct backend * backend, const struct blocks * w,
         [commands waitUntilCompleted];
         memcpy(y, r->y.contents, (size_t)w->out * sizeof(float));
     } else {
-        cpu_blocks(backend, w, x, y);
+        m->rest(backend, w, x, y);
     }
 }
 
@@ -125,6 +128,7 @@ static struct backend * metal_open(const char * const * options) {
     struct backend * blas = backend_open("blas", options);
     if (m != NULL && blas != NULL) {
         m->backend = *blas;
+        m->rest = blas->blocks;
         m->backend.name = "metal";
         m->backend.blocks = metal_blocks;
         m->backend.close = metal_close;

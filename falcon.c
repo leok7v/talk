@@ -6,7 +6,8 @@
 
 enum { DIM = 512, LAYERS = 24, HEADS = 8, GROUPS = 2, HEAD = 64, FFN = 768,
        INNER = 768, STATE = 64, SCANS = 24, SCAN = 32, CONV = 4, XBC = 896,
-       PROJ = 1688, VOCAB = 32768, CONTEXT = 16384, EOS = 11, IM_END = 228 };
+       PROJ = 1688, VOCAB = 32768, CONTEXT = 16384, EOS = 11, IM_END = 228,
+       TOOL_CALL = 21, TOOL_END = 22 };
 
 struct layer {
     const float * attn_norm;
@@ -36,12 +37,14 @@ struct falcon {
     struct gguf gguf;
     struct layer layers[LAYERS];
     const uint8_t * embed;
+    uint32_t embed_type;
     const float * output_norm;
     struct matrix output;
     float rope_rate[HEAD / 2];
     struct chat chat;
     int32_t position;
     int32_t row;
+    char * tools;
     float last[DIM];
 };
 
@@ -215,8 +218,7 @@ static void forward(struct falcon * self, const int32_t * tokens,
     float * a = n + size;
     float * s = a + size;
     for (int32_t r = 0; r < rows; r++) {
-        gguf_decode(x + r * DIM, self->embed + (size_t)tokens[r] *
-                    (DIM / GGUF_BLOCK) * (GGUF_BLOCK + 2), DIM);
+        gguf_row(x + r * DIM, self->embed, tokens[r], DIM, self->embed_type);
     }
     for (int32_t l = 0; l < LAYERS; l++) {
         norm(n, x, self->layers[l].attn_norm, rows);
@@ -293,15 +295,77 @@ static const struct format format = {
     .plain = "", .think = ""
 };
 
+static const struct format tooled = {
+    .start = " <|begin_of_text|>", .open = "<|im_start|>", .middle = "\n",
+    .close = "<|im_end|>", .reply = "<|im_start|>assistant\n", .plain = "",
+    .think = "", .trim = true
+};
+
+static const struct format answered = {
+    .start = " <|begin_of_text|>", .open = "<|im_start|>", .middle = "\n",
+    .close = "\n<|im_end|>", .reply = "<|im_start|>assistant\n", .plain = "",
+    .think = "", .trim = true
+};
+
+static const char tools_open[] =
+    "You are a Falcon assistant skilled in function calling. You are "
+    "helpful, respectful, and concise.\n\n# Tools\n\nYou have access to "
+    "the following functions. You MUST use them to answer questions when "
+    "needed. For each function call, you MUST return a JSON object inside "
+    "<tool_call></tool_call> tags.\n\n<tools>";
+
+static const char tools_close[] =
+    "</tools>\n\n# Output Format\n\nYour response MUST follow this format "
+    "when making function calls:\n<tool_call>\n[\n  {\"name\": "
+    "\"function_name\", \"arguments\": {\"arg1\": \"value1\", \"arg2\": "
+    "\"value2\"}},\n  {\"name\": \"another_function\", \"arguments\": "
+    "{\"arg\": \"value\"}}\n]\n</tool_call>\nIf no function calls are "
+    "needed, respond normally without the tool_call tags.";
+
 static void falcon_reset(struct llm * llm) {
     struct falcon * self = (struct falcon *)llm;
     chat_start(&self->chat, &self->gguf, &format);
+    free(self->tools);
+    self->tools = NULL;
+}
+
+static void tooled_message(struct falcon * self, const char * role,
+                           const char * content) {
+    struct chat * c = &self->chat;
+    const struct gguf * g = &self->gguf;
+    const char * from = content + strspn(content, " \t\r\n");
+    if (strcmp(role, "system") == 0) {
+        chat_begin(c);
+        chat_special(c, g, "<|system|>");
+        chat_content(c, g, &tooled, content);
+        chat_special(c, g, tools_open);
+        chat_content(c, g, &tooled, self->tools);
+        chat_special(c, g, tools_close);
+        chat_want(c, MARK_SYSTEM);
+    } else if (strcmp(role, "tool") == 0) {
+        chat_begin(c);
+        chat_special(c, g, "<|im_start|>assistant\n<tool_response>\n");
+        chat_content(c, g, &tooled, content);
+        chat_special(c, g, "\n</tool_response><|im_end|>");
+    } else if (strcmp(role, "assistant") != 0) {
+        chat_message(c, g, &tooled, role, content, NULL);
+    } else if (strncmp(from, "<tool_call>", 11) == 0) {
+        chat_begin(c);
+        chat_special(c, g, from);
+    } else {
+        chat_message(c, g, &answered, role, content, NULL);
+    }
 }
 
 static void falcon_message(struct llm * llm, const char * role,
                            const char * content) {
     struct falcon * self = (struct falcon *)llm;
-    if (strcmp(role, "tools") != 0) {
+    if (strcmp(role, "tools") == 0 && !self->chat.counting) {
+        free(self->tools);
+        self->tools = strdup(content);
+    } else if (strcmp(role, "tools") != 0 && self->tools != NULL) {
+        tooled_message(self, role, content);
+    } else if (strcmp(role, "tools") != 0) {
         chat_message(&self->chat, &self->gguf, &format, role, content, NULL);
     }
 }
@@ -325,6 +389,35 @@ static void falcon_rewind(struct llm * llm, int32_t messages) {
     chat_rewind(&((struct falcon *)llm)->chat, messages);
 }
 
+static bool going(const struct chat * c, const struct turn * turn,
+                  int32_t count, int32_t token) {
+    return count < turn->limit && c->fed_count < c->context && token >= 0 &&
+           token != IM_END && token != EOS && token != TOOL_END &&
+           (turn->alive == NULL || turn->alive(turn->who));
+}
+
+static int32_t reply_text(const struct falcon * self, char * text,
+                          int32_t size, int32_t capacity, int32_t token,
+                          const struct turn * turn) {
+    const int32_t end = token == TOOL_CALL || token == TOOL_END ?
+                        gguf_mark(&self->gguf, text, size, capacity, token) :
+                        gguf_text(&self->gguf, text, size, capacity, token);
+    text[end] = 0;
+    if (turn->said != NULL) {
+        turn->said(turn->who, text, end);
+    }
+    return end;
+}
+
+static void reply_end(struct falcon * self, const char * text) {
+    if (self->tools != NULL) {
+        chat_rewind(&self->chat, 1);
+        tooled_message(self, "assistant", text);
+    } else {
+        chat_special(&self->chat, &self->gguf, format.close);
+    }
+}
+
 static int32_t falcon_reply(struct llm * llm, char * text, int32_t capacity,
                             struct turn * turn) {
     struct falcon * self = (struct falcon *)llm;
@@ -336,27 +429,26 @@ static int32_t falcon_reply(struct llm * llm, char * text, int32_t capacity,
     int32_t token = 0;
     must(s != NULL, "memory");
     const bool fits = chat_fit(c, turn);
-    chat_reply(c, &self->gguf, &format, false);
+    chat_reply(c, &self->gguf, self->tools != NULL ? &tooled : &format,
+               false);
     if (fits) {
         chat_feed(c);
     }
     turn->kept = c->kept;
     turn->fed = c->fed_count - c->kept;
     token = fits && sampler_open(s, &self->gguf, c, turn) ? 0 : -1;
-    while (count < turn->limit && c->fed_count < c->context && token >= 0 &&
-           token != IM_END && token != EOS &&
-           (turn->alive == NULL || turn->alive(turn->who))) {
+    while (going(c, turn, count, token)) {
         gguf_linear(&self->gguf, logits, self->last, &self->output, VOCAB,
                     DIM, 1);
         token = sampler_next(s, logits);
         if (token >= 0 && token != IM_END && token != EOS) {
-            size = gguf_text(&self->gguf, text, size, capacity, token);
+            size = reply_text(self, text, size, capacity, token, turn);
             chat_took(c, token);
         }
         count++;
     }
-    chat_special(c, &self->gguf, format.close);
     text[size] = 0;
+    reply_end(self, text);
     free(logits);
     free(s);
     return count;
@@ -372,6 +464,7 @@ static void falcon_close(struct llm * llm) {
     }
     gguf_close(&self->gguf);
     chat_close(&self->chat);
+    free(self->tools);
     free(self);
 }
 
@@ -384,7 +477,9 @@ static void falcon_load(struct falcon * self) {
         layer_open(self, l);
     }
     self->embed = gguf_info(g, "token_embd.weight", &type, &count);
-    g->faults += type == GGUF_Q8_0 && count == (uint64_t)VOCAB * DIM ? 0 : 1;
+    self->embed_type = type;
+    g->faults += (type == GGUF_Q8_0 || type == GGUF_Q4_0) &&
+                 count == (uint64_t)VOCAB * DIM ? 0 : 1;
     self->output_norm = gguf_tensor(g, "output_norm.weight", 0);
     self->output = gguf_matrix(g, "output.weight", 0);
     for (int32_t i = 0; i < HEAD / 2; i++) {
