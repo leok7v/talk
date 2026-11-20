@@ -419,10 +419,14 @@ static int32_t falcon_reply(struct llm * llm, char * text, int32_t capacity,
     struct chat * c = &self->chat;
     struct sampler * s = malloc(sizeof *s);
     float * logits = floats(VOCAB);
+    struct turn verbatim = *turn;
     int32_t size = 0;
     int32_t count = 0;
     int32_t token = 0;
     must(s != NULL, "memory");
+    verbatim.temperature = 0.0f;
+    verbatim.dry = 0.0f;
+    verbatim.presence = 0.0f;
     const bool fits = chat_fit(c, turn);
     chat_reply(c, &self->gguf, self->tools != NULL ? &tooled : &format,
                false);
@@ -439,6 +443,7 @@ static int32_t falcon_reply(struct llm * llm, char * text, int32_t capacity,
         gguf_linear(&self->gguf, logits, self->last, &self->output, VOCAB,
                     DIM, 1);
         token = sampler_next(s, logits);
+        s->turn = token == TOOL_CALL ? &verbatim : s->turn;
         if (token >= 0 && token != IM_END && token != EOS) {
             size = reply_text(self, text, size, capacity, token, turn);
             chat_took(c, token);
