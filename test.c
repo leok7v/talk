@@ -329,11 +329,17 @@ static void stored_test(const struct store * store) {
     chat_feed(&c);
     expect(f.runs == 1 && f.row[0] == TOKENS && f.count[0] == 1,
            "a chat that came back feeds only the new token");
-    c.stored->clean = 0;
+    chat_close(&c);
+    must(chat_open(fake_chat(&c, &f), 1024, store), "chat");
+    expect(c.fed_count == TOKENS && c.pending_count == TOKENS,
+           "a turn with no commit leaves the file at the last commit");
+    chat_resume(&c);
+    c.pending_count = 5;
+    chat_token(&c, 3000);
     chat_close(&c);
     must(chat_open(fake_chat(&c, &f), 1024, store), "chat");
     expect(c.fed_count == 0 && c.pending_count == 0,
-           "a chat that was not committed starts empty");
+           "a turn that writes over the commit starts empty");
     chat_close(&c);
     other.path = NULL;
     must(chat_open(fake_chat(&c, &f), 1024, &other), "chat");
@@ -348,6 +354,30 @@ static void stored_test(const struct store * store) {
     chat_close(&c);
     remove("test.state");
     remove("test.copy");
+}
+
+static bool fake_alive(void * who) {
+    int32_t * left = who;
+    *left -= 1;
+    return *left >= 0;
+}
+
+static void stop_test(void) {
+    static struct chat c;
+    struct fake f = { .ordered = true };
+    const struct store store = { .state_size = sizeof f.next };
+    int32_t left = 1;
+    must(chat_open(fake_chat(&c, &f), 1024, &store), "chat");
+    pending_make(&c);
+    c.alive = fake_alive;
+    c.who = &left;
+    chat_feed(&c);
+    expect(f.runs == 1 && c.fed_count == 10, "a feed stops between runs");
+    left = 100;
+    chat_feed(&c);
+    expect(f.ordered && f.runs == 5 && c.fed_count == TOKENS,
+           "a feed that stopped goes on from its place");
+    chat_close(&c);
 }
 
 static void feed_test(void) {
@@ -441,6 +471,7 @@ int main(void) {
     path_test();
     backends_test();
     feed_test();
+    stop_test();
     attend_test();
     printf("test: %s, %d checks, %d faults\n", faults == 0 ? "PASS" : "FAIL",
            checks, faults);

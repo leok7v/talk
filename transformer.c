@@ -780,10 +780,19 @@ void chat_clear(struct chat * c) {
     c->start_count = 0;
 }
 
+static void stored_guard(struct chat * c) {
+    const struct stored * h = c->stored;
+    if (c->pending_count < h->pending_count ||
+        c->fed_count < h->fed_count || c->start_count < h->start_count) {
+        c->stored->clean = 0;
+    }
+}
+
 void chat_token(struct chat * c, int32_t token) {
     if (c->counting) {
         c->counted++;
     } else if (c->pending_count < c->capacity) {
+        stored_guard(c);
         c->pending[c->pending_count++] = token;
     } else {
         c->overflow = true;
@@ -806,6 +815,7 @@ void chat_special(struct chat * c, const struct gguf * g, const char * s) {
 
 void chat_begin(struct chat * c) {
     if (!c->counting && c->start_count < CHAT_STARTS) {
+        stored_guard(c);
         c->starts[c->start_count++] = c->pending_count;
     }
 }
@@ -865,9 +875,11 @@ void chat_feed(struct chat * c) {
         marks_restore(c, same);
     }
     c->kept = c->fed_count;
-    while (c->fed_count < c->pending_count) {
+    while (c->fed_count < c->pending_count &&
+           (c->alive == NULL || c->alive(c->who))) {
         const int32_t count = feed_run(c);
         marks_save(c);
+        stored_guard(c);
         c->forward(c->engine, c->pending + c->fed_count, count,
                    c->fed_count + c->dropped, c->fed_count);
         memcpy(c->fed + c->fed_count, c->pending + c->fed_count,
@@ -878,6 +890,7 @@ void chat_feed(struct chat * c) {
 }
 
 void chat_took(struct chat * c, int32_t token) {
+    stored_guard(c);
     c->forward(c->engine, &token, 1, c->fed_count + c->dropped,
                c->fed_count);
     c->fed[c->fed_count++] = token;
@@ -978,6 +991,7 @@ static bool fed_through(const struct chat * c, int32_t end) {
 }
 
 static void fed_cut(struct chat * c, int32_t keep, int32_t count) {
+    c->stored->clean = 0;
     c->shift(c->engine, keep, count, c->fed_count);
     c->synced = c->synced < keep ? c->synced : keep;
     memmove(c->fed + keep, c->fed + keep + count,
@@ -996,6 +1010,7 @@ static void fed_cut(struct chat * c, int32_t keep, int32_t count) {
 
 static void pending_cut(struct chat * c, int32_t keep, int32_t count,
                         int32_t first, int32_t last) {
+    c->stored->clean = 0;
     memmove(c->pending + keep, c->pending + keep + count,
             (size_t)(c->pending_count - keep - count) * sizeof(int32_t));
     c->pending_count -= count;
@@ -1019,7 +1034,6 @@ bool chat_fit(struct chat * c, struct turn * turn) {
     const bool soft = turn->shift == SHIFT_SOFT && count > 0 &&
                       system->position == keep &&
                       fed_through(c, keep + count);
-    c->stored->clean = 0;
     turn->dropped = 0;
     turn->full = c->overflow ||
                  (tight && (turn->shift == SHIFT_NONE || count == 0));

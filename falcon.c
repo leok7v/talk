@@ -426,12 +426,15 @@ static int32_t falcon_reply(struct llm * llm, char * text, int32_t capacity,
     const bool fits = chat_fit(c, turn);
     chat_reply(c, &self->gguf, self->tools != NULL ? &tooled : &format,
                false);
+    c->alive = turn->alive;
+    c->who = turn->who;
     if (fits) {
         chat_feed(c);
     }
+    const bool fed = fits && c->fed_count == c->pending_count;
     turn->kept = c->kept;
     turn->fed = c->fed_count - c->kept;
-    token = fits && sampler_open(s, &self->gguf, c, turn) ? 0 : -1;
+    token = fed && sampler_open(s, &self->gguf, c, turn) ? 0 : -1;
     while (going(c, turn, count, token)) {
         gguf_linear(&self->gguf, logits, self->last, &self->output, VOCAB,
                     DIM, 1);
@@ -443,9 +446,13 @@ static int32_t falcon_reply(struct llm * llm, char * text, int32_t capacity,
         count++;
     }
     text[size] = 0;
-    reply_end(self, text);
-    c->mode = self->tools != NULL ? 1 : 0;
-    chat_commit(c);
+    if (fed) {
+        reply_end(self, text);
+        c->mode = self->tools != NULL ? 1 : 0;
+        chat_commit(c);
+    } else {
+        chat_rewind(c, 1);
+    }
     free(logits);
     free(s);
     return count;

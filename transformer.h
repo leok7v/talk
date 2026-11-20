@@ -86,6 +86,8 @@ struct chat {
                    int32_t rows);
     void (* save)(void * engine, uint8_t * to);
     void (* load)(void * engine, const uint8_t * from);
+    bool (* alive)(void * who);
+    void * who;
     int32_t context;
     int32_t capacity;
     bool overflow;
