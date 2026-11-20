@@ -1,0 +1,36 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install clang and OpenBLAS
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld libopenblas-openmp-dev
+      - name: Build with zero warnings
+        run: |
+          make 2>&1 | tee build.log
+          ! grep -q 'warning:' build.log
+      - name: Test with no model
+        run: ./test
+      - name: Cache the models
+        uses: actions/cache@v6
+        with:
+          path: models
+          key: models-v1
+      - name: Download the models
+        run: ./download.sh models -y
+      - name: Check every endpoint on the CPU backend
+        run: ./check.sh gemm=cpu
+      - name: Show the server log after a failure
+        if: failure()
+        run: cat tmp/check/talk.log tmp/check/out.txt || true

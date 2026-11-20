@@ -1,0 +1,731 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Talk</title>
+<style>
+body {
+    margin: 0;
+    background: #17181c;
+    color: #e8e8ea;
+    font-family: system-ui, -apple-system, sans-serif;
+}
+[hidden] {
+    display: none !important;
+}
+main {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 16px;
+}
+h1 {
+    margin: 8px 0 16px 0;
+    font-size: 22px;
+    font-weight: 600;
+}
+#log {
+    height: 55vh;
+    overflow-y: auto;
+    border: 1px solid #33343a;
+    border-radius: 10px;
+    padding: 10px;
+    background: #1e1f24;
+}
+.message {
+    max-width: 85%;
+    margin: 8px 0;
+    padding: 9px 12px;
+    border-radius: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+.message.user {
+    margin-left: auto;
+    background: #2f6fed;
+    color: #ffffff;
+}
+.message.assistant {
+    margin-right: auto;
+    background: #2b2c31;
+}
+.message.heard {
+    margin-left: auto;
+    background: #26324d;
+    color: #b9c4de;
+    font-size: 13px;
+}
+.message.thought {
+    margin-right: auto;
+    background: #24252a;
+    color: #8e9099;
+    font-size: 13px;
+    font-style: italic;
+}
+.message.error {
+    margin-right: auto;
+    background: #5c2020;
+    color: #ffd9d9;
+}
+#status {
+    margin: 12px 0;
+    color: #9a9ba1;
+    font-size: 14px;
+    min-height: 20px;
+}
+.controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+}
+#mic {
+    width: 64px;
+    height: 64px;
+    border: none;
+    border-radius: 50%;
+    background: #2f6fed;
+    color: #ffffff;
+    font-size: 26px;
+    cursor: pointer;
+    flex: none;
+}
+#mic.listening {
+    background: #d33;
+    animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(221, 51, 51, 0.6); }
+    70% { box-shadow: 0 0 0 14px rgba(221, 51, 51, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(221, 51, 51, 0); }
+}
+#stop {
+    height: 44px;
+    padding: 0 18px;
+    border: 1px solid #55565e;
+    border-radius: 22px;
+    background: #26272c;
+    color: #e8e8ea;
+    font-size: 15px;
+    cursor: pointer;
+    flex: none;
+}
+#voice, #language, #engine, #llm, #think, #shift, #stopmode, #form {
+    height: 44px;
+    border: 1px solid #55565e;
+    border-radius: 8px;
+    background: #26272c;
+    color: #e8e8ea;
+    font-size: 15px;
+    padding: 0 8px;
+}
+.switches {
+    display: flex;
+    gap: 14px;
+    flex-basis: 100%;
+}
+.switch {
+    color: #9a9ba1;
+    font-size: 14px;
+    white-space: nowrap;
+}
+.switch input {
+    margin-right: 6px;
+}
+.textrow {
+    display: flex;
+    gap: 10px;
+    margin-top: 12px;
+}
+#script {
+    flex: 1;
+    height: 36px;
+    border: 1px solid #55565e;
+    border-radius: 8px;
+    background: #26272c;
+    color: #e8e8ea;
+    font-size: 14px;
+    padding: 0 12px;
+}
+#text {
+    flex: 1;
+    height: 44px;
+    border: 1px solid #55565e;
+    border-radius: 8px;
+    background: #26272c;
+    color: #e8e8ea;
+    font-size: 15px;
+    padding: 0 12px;
+}
+#send {
+    height: 44px;
+    padding: 0 18px;
+    border: none;
+    border-radius: 8px;
+    background: #2f6fed;
+    color: #ffffff;
+    font-size: 15px;
+    cursor: pointer;
+}
+.hint {
+    margin-top: 12px;
+    color: #77787e;
+    font-size: 13px;
+    line-height: 1.5;
+}
+</style>
+</head>
+<body>
+<main>
+<h1>Talk</h1>
+<div id="log"></div>
+<div id="status">idle</div>
+<div class="controls">
+<button id="mic" type="button" title="Record">&#127908;</button>
+<button id="stop" type="button">Stop</button>
+<select id="voice" title="Voice"></select>
+<select id="language" title="Language you speak"></select>
+<select id="engine" title="Speech to text engine"></select>
+<div class="switches">
+<select id="llm" title="Chat engine"></select>
+<select id="think" title="Sentences of thought, Qwen only"></select>
+<select id="shift" title="What to do when the context is full"></select>
+<select id="stopmode" title="What Stop does to the turn"></select>
+<select id="form" title="The form of a reply"></select>
+</div>
+<div class="switches" id="scriptrow" hidden>
+<input id="script" type="text" autocomplete="off"
+       placeholder='S{1,3}: 1 to 3 sentences. "text": fixed words. *: free'>
+</div>
+<div class="switches">
+<label class="switch"><input id="suppress" type="checkbox" checked>noise
+suppression</label>
+<label class="switch"><input id="gain" type="checkbox" checked>auto
+gain</label>
+</div>
+</div>
+<div class="textrow">
+<input id="text" type="text" placeholder="Type a message instead"
+       autocomplete="off">
+<button id="send" type="button">Send</button>
+</div>
+<p class="hint">Press the microphone, wait for "listening", speak, press
+it again to send.
+Pressing the microphone while an answer plays stops the answer and
+starts recording. Stop ends playback and cancels the request.</p>
+<audio id="player"></audio>
+<script>
+const log = document.getElementById('log');
+const statusLine = document.getElementById('status');
+const micButton = document.getElementById('mic');
+const stopButton = document.getElementById('stop');
+const voiceSelect = document.getElementById('voice');
+const languageSelect = document.getElementById('language');
+const engineSelect = document.getElementById('engine');
+const llmSelect = document.getElementById('llm');
+const thinkSelect = document.getElementById('think');
+const shiftSelect = document.getElementById('shift');
+const stopSelect = document.getElementById('stopmode');
+const formSelect = document.getElementById('form');
+const scriptRow = document.getElementById('scriptrow');
+const scriptInput = document.getElementById('script');
+const suppressBox = document.getElementById('suppress');
+const gainBox = document.getElementById('gain');
+const textInput = document.getElementById('text');
+const sendButton = document.getElementById('send');
+const player = document.getElementById('player');
+
+const voices = ['F1 Sarah', 'F2 Lily', 'F3 Jessica', 'F4 Olivia',
+    'F5 Emily', 'F6 Luna', 'F7 Rosie', 'F8 Kiki', 'M1 Alex',
+    'M2 James', 'M3 Robert', 'M4 Sam', 'M5 Daniel', 'M6 Jasper',
+    'M7 Bruno', 'M8 Hugo', 'M9 Leo'];
+for (const voice of voices) {
+    const option = document.createElement('option');
+    option.value = voice.slice(0, 2);
+    option.textContent = voice;
+    voiceSelect.appendChild(option);
+}
+
+const languages = ['auto', 'en', 'de', 'fr', 'es', 'it', 'nl', 'pl'];
+for (const language of languages) {
+    const option = document.createElement('option');
+    option.value = language === 'auto' ? '' : language;
+    option.textContent = language;
+    languageSelect.appendChild(option);
+}
+const locale = (navigator.language || '').slice(0, 2).toLowerCase();
+languageSelect.value = languages.includes(locale) ? locale : '';
+
+const plainBanned = '\n\r*#()[]:;"`\u2014\u2013\u201C\u201D';
+const quoteMarks = { en: '', de: '\u201E\u201A\u00BB\u00AB',
+    fr: '\u00AB\u00BB', es: '\u00AB\u00BB', it: '\u00AB\u00BB',
+    nl: '\u201E\u201A', pl: '\u201E\u00AB\u00BB' };
+
+function sentenceMarks() {
+    const quotes = quoteMarks[languageSelect.value];
+    return quotes === undefined ? {}
+        : { ends: '.!?', banned: plainBanned + quotes };
+}
+
+function browserName() {
+    return navigator.userAgent.includes('Chrome') ? 'chrome' : 'safari';
+}
+
+function addOption(select, value, label) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    select.appendChild(option);
+}
+
+function addEngine(value, label) {
+    addOption(engineSelect, value, label);
+}
+
+for (const count of [0, 1, 2, 3, 4]) {
+    addOption(thinkSelect, count, count === 0 ? 'no thought'
+        : 'thought ' + count);
+}
+for (const form of ['none', 'soft', 'exact']) {
+    addOption(shiftSelect, form, 'shift ' + form);
+}
+addOption(stopSelect, 'keep', 'stop keeps turn');
+addOption(stopSelect, 'drop', 'stop drops turn');
+addOption(formSelect, 'S{1,3}', 'reply: up to 3 sentences');
+addOption(formSelect, 'S', 'reply: 1 sentence');
+addOption(formSelect, 'S{1,6}', 'reply: up to 6 sentences');
+addOption(formSelect, '*', 'reply: free text');
+addOption(formSelect, '', 'reply: own script');
+scriptInput.value = 'S{1,3}';
+formSelect.onchange = () => {
+    scriptRow.hidden = formSelect.value !== '';
+    scriptInput.value = formSelect.value || scriptInput.value;
+};
+
+fetch('/api/engines').then(readJson).then(data => {
+    const names = data.asr || [];
+    for (const name of names) {
+        addEngine(name, name);
+    }
+    if (names.length > 1) {
+        addEngine('all', 'compare');
+    }
+    engineSelect.value = data.default || '';
+    engineSelect.hidden = names.length < 2;
+    const chats = data.llm || [];
+    for (const name of chats) {
+        addOption(llmSelect, name, name);
+    }
+    llmSelect.value = data.llm_default || '';
+    llmSelect.hidden = chats.length < 2;
+});
+
+let epoch = 0;
+let state = 'idle';
+let recorder = null;
+let audioUrl = null;
+let playResolve = null;
+let history = [];
+let current = null;
+let turnLive = false;
+
+function setState(next) {
+    state = next;
+    statusLine.textContent = next;
+    micButton.classList.toggle('listening', next === 'listening');
+}
+
+function addMessage(kind, text) {
+    const item = document.createElement('div');
+    item.className = 'message ' + kind;
+    item.textContent = text;
+    log.appendChild(item);
+    log.scrollTop = log.scrollHeight;
+}
+
+async function readJson(response) {
+    try {
+        return await response.json();
+    } catch (error) {
+        return {};
+    }
+}
+
+function writeString(view, offset, text) {
+    for (let i = 0; i < text.length; i++) {
+        view.setUint8(offset + i, text.charCodeAt(i));
+    }
+}
+
+function encodeWav(samples, rate) {
+    const bytes = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(bytes);
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeString(view, 8, 'WAVE');
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, rate, true);
+    view.setUint32(28, rate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeString(view, 36, 'data');
+    view.setUint32(40, samples.length * 2, true);
+    let offset = 44;
+    for (let i = 0; i < samples.length; i++) {
+        const sample = Math.max(-1, Math.min(1, samples[i]));
+        const value = sample < 0 ? sample * 32768 : sample * 32767;
+        view.setInt16(offset, value, true);
+        offset += 2;
+    }
+    return new Blob([bytes], { type: 'audio/wav' });
+}
+
+function resample(input, from, to) {
+    const ratio = from / to;
+    const count = Math.floor(input.length / ratio);
+    const output = new Float32Array(count);
+    for (let i = 0; i < count; i++) {
+        const begin = Math.floor(i * ratio);
+        const end = Math.max(begin + 1, Math.floor((i + 1) * ratio));
+        let sum = 0;
+        for (let k = begin; k < end && k < input.length; k++) {
+            sum += input[k];
+        }
+        output[i] = sum / (end - begin);
+    }
+    return output;
+}
+
+function hasSound(chunk) {
+    for (let i = 0; i < chunk.length; i++) {
+        if (chunk[i] !== 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+async function startListening() {
+    setState('starting');
+    const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true,
+                 noiseSuppression: suppressBox.checked,
+                 autoGainControl: gainBox.checked }
+    });
+    const context = new AudioContext();
+    const source = context.createMediaStreamSource(stream);
+    const silent = context.createGain();
+    silent.gain.value = 0;
+    silent.connect(context.destination);
+    const chunks = [];
+    let node = null;
+    let processor = null;
+    const track = stream.getAudioTracks()[0].getSettings();
+    const rates = context.sampleRate + ' Hz, microphone '
+        + (track.sampleRate || 'unknown') + ' Hz, noise suppression '
+        + track.noiseSuppression + ', auto gain ' + track.autoGainControl;
+    const keep = chunk => {
+        if (state === 'starting' && hasSound(chunk)) {
+            setState('listening');
+            statusLine.textContent = 'listening, ' + rates;
+        }
+        if (state === 'listening') {
+            chunks.push(chunk);
+        }
+    };
+    recorder = {
+        wav() {
+            const rate = context.sampleRate;
+            let count = 0;
+            for (const chunk of chunks) {
+                count += chunk.length;
+            }
+            const joined = new Float32Array(count);
+            let at = 0;
+            for (const chunk of chunks) {
+                joined.set(chunk, at);
+                at += chunk.length;
+            }
+            const samples = rate === 16000 ? joined
+                : resample(joined, rate, 16000);
+            return encodeWav(samples, 16000);
+        },
+        close() {
+            if (node) {
+                node.disconnect();
+            }
+            if (processor) {
+                processor.disconnect();
+            }
+            source.disconnect();
+            silent.disconnect();
+            context.close();
+            for (const track of stream.getTracks()) {
+                track.stop();
+            }
+        }
+    };
+    const workletCode = 'class Capture extends AudioWorkletProcessor {'
+        + ' process(inputs) { const input = inputs[0];'
+        + ' if (input && input.length > 0) {'
+        + ' this.port.postMessage(input[0].slice(0)); }'
+        + ' return true; } }'
+        + ' registerProcessor("capture", Capture);';
+    try {
+        const moduleUrl = URL.createObjectURL(new Blob([workletCode],
+            { type: 'application/javascript' }));
+        await context.audioWorklet.addModule(moduleUrl);
+        node = new AudioWorkletNode(context, 'capture');
+        node.port.onmessage = event => {
+            keep(event.data);
+        };
+        source.connect(node);
+        node.connect(silent);
+    } catch (error) {
+        processor = context.createScriptProcessor(4096, 1, 1);
+        processor.onaudioprocess = event => {
+            keep(new Float32Array(event.inputBuffer.getChannelData(0)));
+        };
+        source.connect(processor);
+        processor.connect(silent);
+    }
+}
+
+function stopRecordingAndSend() {
+    const done = recorder;
+    recorder = null;
+    if (!done) {
+        setState('idle');
+        return;
+    }
+    const wav = done.wav();
+    done.close();
+    if (wav.size <= 44) {
+        setState('idle');
+        addMessage('error', 'nothing was recorded');
+        return;
+    }
+    runVoiceTurn(wav);
+}
+
+function finishPlay() {
+    if (playResolve) {
+        const resolve = playResolve;
+        playResolve = null;
+        resolve();
+    }
+}
+
+function playAudio(myEpoch) {
+    return new Promise(resolve => {
+        playResolve = resolve;
+        player.onended = finishPlay;
+        player.play().catch(() => {
+            if (myEpoch !== epoch) {
+                finishPlay();
+                return;
+            }
+            statusLine.textContent = 'tap the page to hear it';
+            document.addEventListener('click', function once() {
+                document.removeEventListener('click', once);
+                player.play().catch(finishPlay);
+            });
+        });
+    });
+}
+
+function halt() {
+    if (turnLive && stopSelect.value === 'drop') {
+        history.splice(-2);
+    }
+    turnLive = false;
+    epoch++;
+    if (current) {
+        current.abort();
+        current = null;
+    }
+    finishPlay();
+    if (audioUrl) {
+        URL.revokeObjectURL(audioUrl);
+        audioUrl = null;
+    }
+    player.pause();
+    player.removeAttribute('src');
+    player.load();
+    if (recorder) {
+        recorder.close();
+        recorder = null;
+    }
+}
+
+async function chatAndSpeak(text, controller, myEpoch) {
+    setState('thinking');
+    const query = '?llm=' + llmSelect.value + '&think=' + thinkSelect.value
+        + '&shift=' + shiftSelect.value + '&latin=1';
+    const reply = await fetch('/api/chat' + query, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Object.assign({ text: text, history: history,
+            script: scriptInput.value.trim() || '*' }, sentenceMarks())),
+        signal: controller.signal
+    });
+    if (myEpoch !== epoch) {
+        return;
+    }
+    const data = await readJson(reply);
+    if (!reply.ok) {
+        throw new Error(data.error || 'chat failed');
+    }
+    const answer = data.text || '';
+    if (data.thought) {
+        addMessage('thought', data.thought.trim());
+    }
+    addMessage('assistant', answer);
+    history.splice(0, data.dropped || 0);
+    history.push({ role: 'user', content: text },
+                 { role: 'assistant', content: answer });
+    turnLive = true;
+    setState('speaking');
+    const spoken = await fetch('/api/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: answer,
+                               voice: voiceSelect.value }),
+        signal: controller.signal
+    });
+    if (myEpoch !== epoch) {
+        return;
+    }
+    if (!spoken.ok) {
+        const problem = await readJson(spoken);
+        throw new Error(problem.error || 'speech failed');
+    }
+    const blob = await spoken.blob();
+    if (myEpoch !== epoch) {
+        return;
+    }
+    audioUrl = URL.createObjectURL(blob);
+    player.src = audioUrl;
+    await playAudio(myEpoch);
+    turnLive = myEpoch === epoch ? false : turnLive;
+}
+
+async function runVoiceTurn(wav) {
+    const controller = new AbortController();
+    current = controller;
+    const myEpoch = ++epoch;
+    try {
+        setState('transcribing');
+        const response = await fetch('/api/transcribe?language='
+            + languageSelect.value + '&asr=' + engineSelect.value
+            + '&tag=ns' + (suppressBox.checked ? 1 : 0)
+            + 'agc' + (gainBox.checked ? 1 : 0) + browserName()
+            + new Date().toTimeString().slice(0, 8).replace(/:/g, ''), {
+            method: 'POST', body: wav, signal: controller.signal
+        });
+        if (myEpoch !== epoch) {
+            return;
+        }
+        const data = await readJson(response);
+        if (!response.ok) {
+            throw new Error(data.error || 'transcription failed');
+        }
+        const texts = data.texts || [];
+        for (const heard of texts.length > 1 ? texts : []) {
+            addMessage('heard', heard.asr + ', ' + heard.seconds + ' s: '
+                + (heard.text.trim() || '(nothing)'));
+        }
+        const text = (data.text || '').trim();
+        if (!text) {
+            addMessage('error', 'nothing was heard');
+            return;
+        }
+        addMessage('user', text);
+        await chatAndSpeak(text, controller, myEpoch);
+    } catch (error) {
+        if (myEpoch === epoch && error.name !== 'AbortError') {
+            addMessage('error', error.message);
+        }
+    } finally {
+        if (myEpoch === epoch) {
+            current = null;
+            if (state !== 'stopped') {
+                setState('idle');
+            }
+        }
+    }
+}
+
+async function handleText(text) {
+    const controller = new AbortController();
+    current = controller;
+    const myEpoch = ++epoch;
+    try {
+        addMessage('user', text);
+        await chatAndSpeak(text, controller, myEpoch);
+    } catch (error) {
+        if (myEpoch === epoch && error.name !== 'AbortError') {
+            addMessage('error', error.message);
+        }
+    } finally {
+        if (myEpoch === epoch) {
+            current = null;
+            if (state !== 'stopped') {
+                setState('idle');
+            }
+        }
+    }
+}
+
+function sendTyped() {
+    const text = textInput.value.trim();
+    if (!text) {
+        return;
+    }
+    textInput.value = '';
+    halt();
+    handleText(text);
+}
+
+micButton.onclick = async () => {
+    if (state === 'listening' || state === 'starting') {
+        stopRecordingAndSend();
+        return;
+    }
+    halt();
+    try {
+        await startListening();
+    } catch (error) {
+        halt();
+        addMessage('error', error.message || 'microphone unavailable');
+        setState('idle');
+    }
+};
+
+stopButton.onclick = () => {
+    halt();
+    setState('stopped');
+};
+
+sendButton.onclick = sendTyped;
+
+textInput.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+        sendTyped();
+    }
+});
+
+fetch('/health').then(response => {
+    if (!response.ok) {
+        statusLine.textContent = 'server error';
+    }
+}).catch(() => {
+    statusLine.textContent = 'server unreachable';
+});
+</script>
+</body>
+</html>
