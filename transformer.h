@@ -113,6 +113,7 @@ struct chat {
 };
 
 struct attention {
+    struct backend * backend;
     const float * keys;
     const float * values;
     int32_t heads;
@@ -150,7 +151,9 @@ void chat_want(struct chat * c, int32_t slot);
 void chat_feed(struct chat * c);
 void chat_took(struct chat * c, int32_t token);
 void chat_rewind(struct chat * c, int32_t messages);
-bool chat_fit(struct chat * c, struct turn * turn);
+bool chat_fit(struct chat * c, struct turn * turn, int32_t head);
+int32_t chat_head(struct chat * c, const struct gguf * g,
+                  const struct format * f, bool think);
 void chat_start(struct chat * c, const struct gguf * g,
                 const struct format * f);
 void chat_message(struct chat * c, const struct gguf * g,

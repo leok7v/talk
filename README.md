@@ -125,6 +125,8 @@ against the script, so the model cannot leave the form.
     S{1,3}                        1 to 3 plain sentences
     "The answer is " S            fixed words, then one sentence
     ("Yes"|"No") "."              a choice of fixed texts
+    "{\"city\": \"" T "\"}"       a text with no quote, up to the fixed text
+    "{\"seconds\": " N "}"        a number, up to the fixed text
     *                             free text, the default
 
 A plain sentence has no line break, no list mark and no bracket, so

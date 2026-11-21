@@ -122,8 +122,8 @@ static void attention(struct falcon * self, float * y, const float * x,
     float * mix = floats((size_t)rows * DIM);
     float * k = m->keys + self->row * GROUPS * HEAD;
     const struct attention a = {
-        .keys = m->keys, .values = m->values, .heads = HEADS,
-        .groups = GROUPS, .head = HEAD
+        .backend = self->gguf.backend, .keys = m->keys, .values = m->values,
+        .heads = HEADS, .groups = GROUPS, .head = HEAD
     };
     gguf_linear(&self->gguf, q, x, &m->q, DIM, DIM, rows);
     gguf_linear(&self->gguf, k, x, &m->k, GROUPS * HEAD, DIM, rows);
@@ -139,17 +139,33 @@ static void attention(struct falcon * self, float * y, const float * x,
     free(mix);
 }
 
-static void convolve(float * xbc, const struct layer * m) {
+static void silus(struct falcon * self, float * x, int32_t n, bool wide) {
+    float * e = floats(wide ? (size_t)n : 1);
+    for (int32_t i = 0; i < n && wide; i++) {
+        e[i] = -x[i];
+    }
+    if (wide) {
+        self->gguf.backend->exp(self->gguf.backend, e, e, n);
+    }
+    for (int32_t i = 0; i < n; i++) {
+        x[i] = wide ? x[i] / (1.0f + e[i]) : silu(x[i]);
+    }
+    free(e);
+}
+
+static void convolve(struct falcon * self, float * xbc,
+                     const struct layer * m, bool wide) {
     for (int32_t c = 0; c < XBC; c++) {
         float * past = m->conv + c * (CONV - 1);
         const float * w = m->conv_w + c * CONV;
         const float now = xbc[c];
-        xbc[c] = silu(m->conv_b[c] + past[0] * w[0] + past[1] * w[1] +
-                      past[2] * w[2] + now * w[3]);
+        xbc[c] = m->conv_b[c] + past[0] * w[0] + past[1] * w[1] +
+                 past[2] * w[2] + now * w[3];
         past[0] = past[1];
         past[1] = past[2];
         past[2] = now;
     }
+    silus(self, xbc, XBC, wide);
 }
 
 static void scan(float * y, const float * xbc, const float * dt,
@@ -179,10 +195,11 @@ static void mamba(struct falcon * self, float * y, const float * x,
     for (int32_t r = 0; r < rows; r++) {
         float * p = proj + r * PROJ;
         float * to = mixed + r * INNER;
-        convolve(p + INNER, m);
+        convolve(self, p + INNER, m, rows > 1);
         scan(to, p + INNER, p + INNER + XBC, m);
+        silus(self, p, INNER, rows > 1);
         for (int32_t i = 0; i < INNER; i++) {
-            to[i] *= silu(p[i]);
+            to[i] *= p[i];
         }
     }
     gguf_linear(&self->gguf, y, mixed, &m->ssm_out, DIM, INNER, rows);
@@ -199,8 +216,9 @@ static void feed(struct falcon * self, float * x, const struct layer * m,
     norm(n, x, m->ffn_norm, rows);
     gguf_linear(&self->gguf, up, n, &m->up, FFN, DIM, rows);
     gguf_linear(&self->gguf, gate, n, &m->gate, FFN, DIM, rows);
+    silus(self, gate, rows * FFN, rows > 1);
     for (int32_t i = 0; i < rows * FFN; i++) {
-        up[i] *= silu(gate[i]);
+        up[i] *= gate[i];
     }
     gguf_linear(&self->gguf, y, up, &m->down, DIM, FFN, rows);
     for (int32_t i = 0; i < rows * DIM; i++) {
@@ -427,9 +445,9 @@ static int32_t falcon_reply(struct llm * llm, char * text, int32_t capacity,
     verbatim.temperature = 0.0f;
     verbatim.dry = 0.0f;
     verbatim.presence = 0.0f;
-    const bool fits = chat_fit(c, turn);
-    chat_reply(c, &self->gguf, self->tools != NULL ? &tooled : &format,
-               false);
+    const struct format * f = self->tools != NULL ? &tooled : &format;
+    const bool fits = chat_fit(c, turn, chat_head(c, &self->gguf, f, false));
+    chat_reply(c, &self->gguf, f, false);
     c->alive = turn->alive;
     c->who = turn->who;
     if (fits) {

@@ -388,6 +388,10 @@ static void stop_test(void) {
     chat_feed(&c);
     expect(f.ordered && f.runs == 5 && c.fed_count == TOKENS,
            "a feed that stopped goes on from its place");
+    struct turn turn = { .limit = 1024 - TOKENS - 2 };
+    expect(chat_fit(&c, &turn, 2) && !turn.full, "a reply that just fits");
+    expect(!chat_fit(&c, &turn, 3) && turn.full,
+           "the start of a reply counts against the context");
     chat_close(&c);
 }
 
@@ -428,7 +432,7 @@ static void feed_test(void) {
     stored_test(&store);
 }
 
-static void attend_test(void) {
+static void attend_test(const char * name) {
     enum { HEADS = 4, GROUPS = 2, HEAD = 8, FIRST = 5 };
     const int32_t wide = HEADS * HEAD;
     const int32_t step = GROUPS * HEAD;
@@ -438,9 +442,10 @@ static void attend_test(void) {
     float * mix = floats(ROWS * wide);
     float * want = floats(ROWS * wide);
     float score[FIRST + ROWS];
-    const struct attention a = { .keys = keys, .values = values,
-                                 .heads = HEADS, .groups = GROUPS,
-                                 .head = HEAD };
+    struct backend * backend = backend_open(name, NULL);
+    const struct attention a = { .backend = backend, .keys = keys,
+                                 .values = values, .heads = HEADS,
+                                 .groups = GROUPS, .head = HEAD };
     fill(keys, (FIRST + ROWS) * step, 4);
     fill(values, (FIRST + ROWS) * step, 5);
     fill(q, ROWS * wide, 6);
@@ -464,7 +469,11 @@ static void attend_test(void) {
         }
     }
     chat_attend(&a, mix, q, FIRST, ROWS);
-    expect(near(mix, want, ROWS * wide), "chat_attend");
+    expect(near(mix, want, ROWS * wide), "chat_attend of a run");
+    memset(mix, 0, (size_t)wide * sizeof(float));
+    chat_attend(&a, mix, q, FIRST, 1);
+    expect(near(mix, want, wide), "chat_attend of one row");
+    backend->close(backend);
     free(keys);
     free(values);
     free(q);
@@ -483,7 +492,8 @@ int main(void) {
     backends_test();
     feed_test();
     stop_test();
-    attend_test();
+    attend_test("cpu");
+    attend_test("blas");
     printf("test: %s, %d checks, %d faults\n", faults == 0 ? "PASS" : "FAIL",
            checks, faults);
     return faults == 0 ? 0 : 1;

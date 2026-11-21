@@ -606,13 +606,98 @@ static void attend(const struct attention * a, float * o, const float * q,
     }
 }
 
+enum { LANES = 16 };
+
+static float peak(const float * x, int32_t n) {
+    float lanes[LANES];
+    float top = -INFINITY;
+    for (int32_t j = 0; j < LANES; j++) {
+        lanes[j] = -INFINITY;
+    }
+    for (int32_t i = 0; i + LANES <= n; i += LANES) {
+        for (int32_t j = 0; j < LANES; j++) {
+            lanes[j] = x[i + j] > lanes[j] ? x[i + j] : lanes[j];
+        }
+    }
+    for (int32_t i = n / LANES * LANES; i < n; i++) {
+        top = x[i] > top ? x[i] : top;
+    }
+    for (int32_t j = 0; j < LANES; j++) {
+        top = lanes[j] > top ? lanes[j] : top;
+    }
+    return top;
+}
+
+static float total(const float * x, int32_t n) {
+    #pragma clang fp reassociate(on)
+    float sum = 0.0f;
+    for (int32_t i = 0; i < n; i++) {
+        sum += x[i];
+    }
+    return sum;
+}
+
+static void soften(const struct attention * a, float * score, int32_t first,
+                   int32_t rows) {
+    const int32_t count = first + rows;
+    const float scale = 1.0f / sqrtf((float)a->head);
+    for (int32_t r = 0; r < rows; r++) {
+        float * row = score + (size_t)r * count;
+        const float top = peak(row, first + r + 1);
+        for (int32_t s = 0; s <= first + r; s++) {
+            row[s] = (row[s] - top) * scale;
+        }
+        for (int32_t s = first + r + 1; s < count; s++) {
+            row[s] = -INFINITY;
+        }
+    }
+    a->backend->exp(a->backend, score, score, rows * count);
+    for (int32_t r = 0; r < rows; r++) {
+        float * row = score + (size_t)r * count;
+        const float gain = 1.0f / total(row, first + r + 1);
+        for (int32_t s = 0; s <= first + r; s++) {
+            row[s] *= gain;
+        }
+    }
+}
+
+static void attend_rows(const struct attention * a, float * mix,
+                        const float * q, int32_t first, int32_t rows,
+                        float * score) {
+    const int32_t count = first + rows;
+    const int32_t wide = a->heads * a->head;
+    for (int32_t h = 0; h < a->heads; h++) {
+        const int32_t at = h * a->groups / a->heads * a->head;
+        const struct gemm_args scores = {
+            .a = q + h * a->head, .b = a->keys + at, .c = score, .m = rows,
+            .n = count, .k = a->head, .lda = wide,
+            .ldb = a->groups * a->head, .ldc = count, .tb = true
+        };
+        const struct gemm_args mixed = {
+            .a = score, .b = a->values + at, .c = mix + h * a->head,
+            .m = rows, .n = a->head, .k = count, .lda = count,
+            .ldb = a->groups * a->head, .ldc = wide
+        };
+        memset(score, 0, (size_t)rows * count * sizeof(float));
+        a->backend->gemm(a->backend, &scores);
+        soften(a, score, first, rows);
+        for (int32_t r = 0; r < rows; r++) {
+            memset(mix + (size_t)r * wide + h * a->head, 0,
+                   (size_t)a->head * sizeof(float));
+        }
+        a->backend->gemm(a->backend, &mixed);
+    }
+}
+
 void chat_attend(const struct attention * a, float * mix, const float * q,
                  int32_t first, int32_t rows) {
-    float * score = floats((size_t)first + rows);
-    for (int32_t i = 0; i < rows * a->heads; i++) {
+    float * score = floats((size_t)(first + rows) * (rows > 1 ? rows : 1));
+    if (rows > 1) {
+        attend_rows(a, mix, q, first, rows, score);
+    }
+    for (int32_t i = 0; i < a->heads && rows == 1; i++) {
         attend(a, mix + i * a->head, q + i * a->head,
-               i % a->heads * a->groups / a->heads, first + i / a->heads + 1,
-               score);
+               i * a->groups / a->heads, first + 1, score);
     }
     free(score);
 }
@@ -1024,12 +1109,22 @@ static void pending_cut(struct chat * c, int32_t keep, int32_t count,
     }
 }
 
-bool chat_fit(struct chat * c, struct turn * turn) {
+int32_t chat_head(struct chat * c, const struct gguf * g,
+                  const struct format * f, bool think) {
+    c->counting = true;
+    c->counted = 0;
+    chat_reply(c, g, f, think);
+    c->counting = false;
+    return c->counted;
+}
+
+bool chat_fit(struct chat * c, struct turn * turn, int32_t head) {
     const struct mark * system = &c->marks[MARK_SYSTEM];
     const int32_t keep = system->wanted > 0 ? system->wanted : 0;
-    const bool tight = c->pending_count + turn->limit > c->context;
+    const int32_t need = turn->limit + head;
+    const bool tight = c->pending_count + need > c->context;
     int32_t first = 0;
-    const int32_t last = tight ? cut_message(c, keep, turn->limit, &first) : 0;
+    const int32_t last = tight ? cut_message(c, keep, need, &first) : 0;
     const int32_t count = tight && last > first ? c->starts[last] - keep : 0;
     const bool soft = turn->shift == SHIFT_SOFT && count > 0 &&
                       system->position == keep &&

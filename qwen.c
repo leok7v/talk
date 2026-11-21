@@ -259,8 +259,8 @@ static void attention(struct qwen * self, float * y, const float * x,
     float * mix = floats((size_t)rows * wide);
     float * k = m->keys + self->row * GROUPS * HEAD;
     const struct attention a = {
-        .keys = m->keys, .values = m->values, .heads = HEADS,
-        .groups = GROUPS, .head = HEAD
+        .backend = g->backend, .keys = m->keys, .values = m->values,
+        .heads = HEADS, .groups = GROUPS, .head = HEAD
     };
     gguf_linear(g, both, x, &m->q, 2 * wide, DIM, rows);
     gguf_linear(g, k, x, &m->k, GROUPS * HEAD, DIM, rows);
@@ -498,7 +498,8 @@ static int32_t qwen_reply(struct llm * llm, char * text, int32_t capacity,
     struct chat * c = &self->chat;
     struct turn scripted = *turn;
     char script[SCRIPT];
-    const bool fits = chat_fit(c, turn);
+    const bool fits = chat_fit(c, turn, chat_head(c, &self->gguf, &format,
+                                                  turn->think > 0));
     const int32_t reply_at = chat_reply(c, &self->gguf, &format,
                                         turn->think > 0);
     const char * given = turn->script != NULL ? turn->script : "*";

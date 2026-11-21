@@ -112,6 +112,18 @@ static void joints(struct sampler * s) {
     }
 }
 
+static bool ended(const struct sampler * s) {
+    int32_t open = 0;
+    for (int32_t i = 0; i < s->step_count; i++) {
+        const bool value = s->steps[i].kind == STEP_TEXT ||
+                           s->steps[i].kind == STEP_NUMBER;
+        const bool closed = i + 1 < s->step_count &&
+                            s->steps[i + 1].kind == STEP_FIXED;
+        open += value && !closed ? 1 : 0;
+    }
+    return open == 0;
+}
+
 static void parse(struct sampler * s, const char * script) {
     const char * p = blank(script);
     while (*p != 0 && !s->faulty && s->step_count < SAMPLER_STEPS) {
@@ -122,15 +134,16 @@ static void parse(struct sampler * s, const char * script) {
             p = sentences(s, p, step);
         } else if (*p == '(') {
             p = choice(s, p, step);
-        } else if (*p == '*') {
-            step->kind = STEP_FREE;
+        } else if (*p == '*' || *p == 'T' || *p == 'N') {
+            step->kind = *p == '*' ? STEP_FREE : *p == 'T' ? STEP_TEXT :
+                         STEP_NUMBER;
             p++;
         } else {
             s->faulty = true;
         }
         p = blank(p);
     }
-    s->faulty = s->faulty || *p != 0 || s->step_count == 0;
+    s->faulty = s->faulty || *p != 0 || s->step_count == 0 || !ended(s);
     joints(s);
 }
 
