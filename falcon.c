@@ -558,7 +558,7 @@ static struct falcon * falcon_new(void) {
 
 static struct llm * falcon_open(const char * path, struct backend * backend,
                                 const char * const * options) {
-    const char * weights = option(options, "weights", "float");
+    const char * weights = option(options, "weights", "packed");
     const char * wanted = option(options, "context", NULL);
     const int32_t context = wanted != NULL ? atoi(wanted) : CONTEXT;
     const bool packed = strcmp(weights, "packed") == 0;

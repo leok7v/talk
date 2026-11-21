@@ -169,7 +169,7 @@ int main(int argc, char ** argv) {
     }
     printf("%-7s %-5s %-6s open %5.2f s | pp %d: %7.1f t/s (first pass "
            "%d: %7.1f) | tg %d: %7.1f t/s, %d fed again\n",
-           llm->name, backend->name, option(options, "weights", "float"),
+           llm->name, backend->name, option(options, "weights", "own"),
            ready, pp.fed, pp.fed / pp.spent, first.fed,
            first.fed / first.spent, tg.count, tg.count / tg.spent, tg.fed);
     llm->close(llm);

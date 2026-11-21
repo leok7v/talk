@@ -91,7 +91,7 @@ and prints the known options.
 
 | option | default | meaning |
 |---|---|---|
-| `weights=` | `float` | `packed` keeps the weights at 2, 4 and 8 bits |
+| `weights=` | per engine | `float`, or `packed`: the weights stay at 2, 4 and 8 bits |
 | `gemm=` | `blas` | the backend: `blas`, `cpu`, or `metal` or `hip` for a GPU |
 | `asr=` `llm=` `tts=` | the first installed | the engine of a role |
 | `context=` | `16384` | the context of the chat model, in tokens |
@@ -113,9 +113,12 @@ and prints the known options.
 The speech engine takes the model file with `model=`: the fp32, q8 or
 q4 file of leok7v/supertonic. The q8 file is the default.
 
-`weights=packed` is for a small device. The server then holds 119 MB
-at the start and not 550 MB. Whistle is 3 times slower and Falcon 2.4
-times slower on an Intel i7-3667U.
+Falcon uses packed weights with no option, and the other engines use
+float weights. Packed weights of Falcon feed and reply as fast as
+float weights. On an Apple M3 the server holds 249 MB after one chat.
+With `weights=float` it holds 593 MB, and with `weights=packed` 156
+MB. Whistle is 3 times slower with packed weights on an Intel
+i7-3667U.
 
 ## Scripts
 
