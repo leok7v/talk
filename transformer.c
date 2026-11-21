@@ -261,15 +261,22 @@ struct matrix gguf_matrix(struct gguf * g, const char * format,
 void gguf_linear(struct gguf * g, float * y, const float * x,
                  const struct matrix * w, int32_t out, int32_t in,
                  int32_t rows) {
+    float * decoded = w->values == NULL && rows >= GGUF_ROWS ?
+                      floats((size_t)out * in) : NULL;
     const struct gemm_args a = {
-        .a = x, .b = w->values, .c = y, .m = rows, .n = out, .k = in,
-        .lda = in, .ldb = in, .ldc = out, .tb = true
+        .a = x, .b = decoded != NULL ? decoded : w->values, .c = y,
+        .m = rows, .n = out, .k = in, .lda = in, .ldb = in, .ldc = out,
+        .tb = true
     };
     const struct blocks b = {
         .codes = w->blocks, .scale = w->scale, .out = out, .in = in,
         .bits = w->bits
     };
-    if (w->values != NULL && rows > 1) {
+    if (decoded != NULL) {
+        gguf_decode(decoded, w->blocks, (uint64_t)out * in,
+                    w->bits == 4 ? GGUF_Q4_0 : GGUF_Q8_0);
+    }
+    if (a.b != NULL && rows > 1) {
         memset(y, 0, (size_t)rows * out * sizeof(float));
         g->backend->gemm(g->backend, &a);
     } else {
@@ -278,6 +285,7 @@ void gguf_linear(struct gguf * g, float * y, const float * x,
                                y + (size_t)r * out);
         }
     }
+    free(decoded);
 }
 
 static bool letter(uint8_t c) {
