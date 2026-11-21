@@ -9,7 +9,7 @@ enum { GGUF_OWNED = 1024, GGUF_BLOCK = 32, GGUF_F32 = 0, GGUF_Q4_0 = 2,
        SAMPLER_BANNED = 32, SAMPLER_MARK = 5, CHAT_ROWS = 256,
        CHAT_HEAD = 4096, CHAT_TRACKS = 64,
        STEP_END = 0, STEP_FIXED = 1, STEP_SENTENCES = 2, STEP_CHOICE = 3,
-       STEP_FREE = 4 };
+       STEP_FREE = 4, STEP_TEXT = 5, STEP_NUMBER = 6 };
 
 struct matrix {
     const float * values;
@@ -204,11 +204,14 @@ struct sampler {
     char last;
     bool joiner;
     bool faulty;
+    const char * tools;
+    int32_t chosen;
 };
 
 bool sampler_open(struct sampler * s, const struct gguf * g,
                   const struct chat * c, const struct turn * turn);
 int32_t sampler_next(struct sampler * s, float * logits);
+void sampler_tools(struct sampler * s, const char * tools);
 
 bool gguf_open(struct gguf * g, const char * path, struct backend * backend,
                bool packed);

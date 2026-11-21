@@ -443,7 +443,10 @@ static int32_t falcon_reply(struct llm * llm, char * text, int32_t capacity,
         gguf_linear(&self->gguf, logits, self->last, &self->output, VOCAB,
                     DIM, 1);
         token = sampler_next(s, logits);
-        s->turn = token == TOOL_CALL ? &verbatim : s->turn;
+        if (token == TOOL_CALL) {
+            s->turn = &verbatim;
+            sampler_tools(s, self->tools);
+        }
         if (token >= 0 && token != IM_END && token != EOS) {
             size = reply_text(self, text, size, capacity, token, turn);
             chat_took(c, token);

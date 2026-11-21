@@ -341,6 +341,27 @@ static struct pick choice_kind(const struct sampler * s, int32_t token) {
     return p;
 }
 
+static struct pick value_kind(const struct sampler * s, int32_t token) {
+    const struct step * next = &s->steps[s->at + 1];
+    const bool number = s->steps[s->at].kind == STEP_NUMBER;
+    struct pick p = { .token = token, .kind = INVALID, .term = -1 };
+    char bytes[PIECE];
+    const int32_t size = gguf_text(s->g, bytes, 0, PIECE, token);
+    int32_t faults = size == 0 ? 1 : 0;
+    for (int32_t i = 0; i < size; i++) {
+        const char c = bytes[i];
+        const bool digit = c != 0 && strchr("0123456789.-", c) != NULL;
+        const bool plain = c != '"' && c != '\\' && (uint8_t)c >= 0x20;
+        faults += (number ? digit : plain) ? 0 : 1;
+    }
+    if (token == s->pool[next->plain.at] && s->length > 0) {
+        p.kind = JOINT_START;
+    } else if (faults == 0 && s->length < LONG) {
+        p.kind = NORMAL;
+    }
+    return p;
+}
+
 static struct pick kind_of(const struct sampler * s, int32_t token) {
     const int32_t kind = s->steps[s->at].kind;
     struct pick p = { .token = token, .kind = NORMAL, .term = -1 };
@@ -348,6 +369,8 @@ static struct pick kind_of(const struct sampler * s, int32_t token) {
         p = sentence_kind(s, token);
     } else if (kind == STEP_CHOICE) {
         p = choice_kind(s, token);
+    } else if (kind == STEP_TEXT || kind == STEP_NUMBER) {
+        p = value_kind(s, token);
     }
     return p;
 }
@@ -502,6 +525,7 @@ static void choice_took(struct sampler * s, int32_t token) {
         s->live[i] = s->live[i] && s->index < c->count &&
                      s->pool[c->at + s->index] == token;
         complete = complete || (s->live[i] && s->index + 1 == c->count);
+        s->chosen = s->live[i] && s->index + 1 == c->count ? i : s->chosen;
     }
     s->index++;
     if (complete) {
@@ -517,7 +541,148 @@ static int32_t fixed_next(struct sampler * s) {
     return token;
 }
 
+static struct step * step_new(struct sampler * s, int32_t kind) {
+    struct step * step = &s->steps[s->step_count];
+    s->faulty = s->faulty || s->step_count >= SAMPLER_STEPS;
+    s->step_count += s->step_count < SAMPLER_STEPS ? 1 : 0;
+    memset(step, 0, sizeof *step);
+    step->kind = kind;
+    return step;
+}
+
+static void step_fixed(struct sampler * s, const char * text) {
+    struct step * step = step_new(s, STEP_FIXED);
+    snprintf(step->text, sizeof step->text, "%s", text);
+    step->plain = encode(s, step->text);
+}
+
+static void step_choice(struct sampler * s, struct step * step,
+                        const char * text) {
+    if (step->choices < SAMPLER_CHOICES) {
+        step->choice[step->choices++] = encode(s, text);
+    }
+}
+
+static bool json_string(const char * value, const char * end, char * out,
+                        size_t capacity) {
+    const char * close = value != NULL && value < end && *value == '"' ?
+                         json_close(value + 1, end) : NULL;
+    out[0] = 0;
+    return close != NULL && json_unescape(value + 1, close, out, capacity);
+}
+
+static const char * tool_at(const char * tools, int32_t index) {
+    const char * end = tools + strlen(tools);
+    const char * at = strchr(tools, '[');
+    const char * found = NULL;
+    int32_t seen = 0;
+    at = at != NULL ? at + 1 : end;
+    while (found == NULL && at < end && *at != ']') {
+        const char * inner = *at == '{' ? json_member(at, end, "function") :
+                             NULL;
+        if (*at == '{' && seen++ == index) {
+            found = inner != NULL ? inner : at;
+        }
+        at = *at == '{' ? json_skip(at, end) : at + 1;
+    }
+    return found;
+}
+
+static void steps_clear(struct sampler * s) {
+    s->step_count = 0;
+    s->pool_count = 0;
+    s->at = 0;
+}
+
+static bool wanted(const char * list, const char * end, const char * key) {
+    char quoted[SAMPLER_TEXT / 2 + 4];
+    const char * last = list != NULL ? json_skip(list, end) : end;
+    const char * found = NULL;
+    snprintf(quoted, sizeof quoted, "\"%s\"", key);
+    found = list != NULL ? strstr(list, quoted) : NULL;
+    return list == NULL || (found != NULL && found < last);
+}
+
+static const char * argument(struct sampler * s, const char * at,
+                             const char * end, char * text,
+                             const char * list) {
+    char key[SAMPLER_TEXT / 2];
+    char type[16];
+    const char * object = json_after(json_close(at + 1, end), end);
+    const size_t used = strlen(text);
+    json_string(at, end, key, sizeof key);
+    json_string(json_member(object, end, "type"), end, type, sizeof type);
+    const bool number = strcmp(type, "integer") == 0 ||
+                        strcmp(type, "number") == 0;
+    const bool flag = strcmp(type, "boolean") == 0;
+    if (wanted(list, end, key)) {
+        snprintf(text + used, SAMPLER_TEXT - used, "%s\"%s\": %s",
+                 s->step_count > 0 ? ", " : "", key,
+                 number || flag ? "" : "\"");
+        step_fixed(s, text);
+        struct step * step = step_new(s, flag ? STEP_CHOICE : number ?
+                                      STEP_NUMBER : STEP_TEXT);
+        if (flag) {
+            step_choice(s, step, "true");
+            step_choice(s, step, "false");
+        }
+        snprintf(text, SAMPLER_TEXT, "%s", number || flag ? "" : "\"");
+    }
+    return object != NULL ? json_skip(object, end) : end;
+}
+
+static void arguments(struct sampler * s) {
+    const char * tool = tool_at(s->tools, s->chosen);
+    const char * end = s->tools + strlen(s->tools);
+    const char * shape = json_member(tool, end, "parameters");
+    const char * all = json_member(shape, end, "properties");
+    const char * list = json_member(shape, end, "required");
+    const char * at = all != NULL ? all + 1 : end;
+    char text[SAMPLER_TEXT] = "\", \"arguments\": {";
+    steps_clear(s);
+    s->tools = NULL;
+    while (at < end && *at != '}') {
+        at = *at == '"' ? argument(s, at, end, text, list) : at + 1;
+    }
+    snprintf(text + strlen(text), sizeof text - strlen(text),
+             "}}\n]\n</tool_call>");
+    step_fixed(s, text);
+    enter(s);
+}
+
+void sampler_tools(struct sampler * s, const char * tools) {
+    const bool open = s->at >= s->step_count ||
+                      s->steps[s->at].kind == STEP_FREE;
+    char name[SAMPLER_TEXT / 2];
+    if (open && tools != NULL && tool_at(tools, 0) != NULL) {
+        const char * end = tools + strlen(tools);
+        steps_clear(s);
+        step_fixed(s, "\n[\n  {\"name\": \"");
+        struct step * names = step_new(s, STEP_CHOICE);
+        for (int32_t i = 0; i < SAMPLER_CHOICES; i++) {
+            const char * tool = tool_at(tools, i);
+            if (json_string(json_member(tool, end, "name"), end, name,
+                            sizeof name)) {
+                step_choice(s, names, name);
+            }
+        }
+        s->tools = tools;
+        enter(s);
+    }
+}
+
+static void value_took(struct sampler * s, struct pick p) {
+    if (p.kind == JOINT_START) {
+        fixed_from(s, s->steps[s->at + 1].plain, 1);
+    } else {
+        s->length++;
+    }
+}
+
 int32_t sampler_next(struct sampler * s, float * logits) {
+    if (s->at >= s->step_count && s->tools != NULL) {
+        arguments(s);
+    }
     const int32_t kind = s->at < s->step_count ? s->steps[s->at].kind :
                          STEP_END;
     int32_t token = -1;
@@ -532,6 +697,8 @@ int32_t sampler_next(struct sampler * s, float * logits) {
             sentence_took(s, p);
         } else if (token >= 0 && kind == STEP_CHOICE) {
             choice_took(s, token);
+        } else if (token >= 0 && (kind == STEP_TEXT || kind == STEP_NUMBER)) {
+            value_took(s, p);
         }
     }
     if (token >= 0) {

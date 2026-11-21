@@ -114,6 +114,17 @@ static void json_test(void) {
            "json_unescape");
     expect(close != NULL && !json_unescape(text, close, tight, sizeof tight),
            "json_unescape full");
+    const char object[] = "{\"a\": [1, {\"b\": \"}\"}], \"key\": 42 , "
+                          "\"in\": {\"key\": \"x\"}}";
+    const char * end = object + strlen(object);
+    const char * key = json_member(object, end, "key");
+    const char * in = json_member(object, end, "in");
+    expect(key != NULL && key[0] == '4' && json_skip(key, end)[0] == ' ',
+           "json_member and json_skip of a number");
+    expect(in != NULL && in[0] == '{' && json_skip(in, end)[0] == '}' &&
+           json_member(in, end, "key")[0] == '"', "json_member of an object");
+    expect(json_member(object, end, "b") == NULL &&
+           json_member(object, end, "ke") == NULL, "json_member absent");
 }
 
 static void wav_head(uint8_t * w, int32_t channels, uint32_t rate,

@@ -23,4 +23,8 @@ float half_float(const uint8_t * p);
 bool json_unescape(const char * begin, const char * end, char * out,
                    size_t capacity);
 const char * json_close(const char * begin, const char * end);
+const char * json_skip(const char * value, const char * end);
+const char * json_after(const char * close, const char * end);
+const char * json_member(const char * object, const char * end,
+                         const char * key);
 int32_t wav_samples(const uint8_t * data, size_t size, float ** samples);

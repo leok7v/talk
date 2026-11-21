@@ -290,6 +290,50 @@ const char * json_close(const char * begin,
     return found;
 }
 
+const char * json_skip(const char * value, const char * end) {
+    const char * at = value;
+    int32_t depth = 0;
+    do {
+        const char * close = at < end && *at == '"' ?
+                             json_close(at + 1, end) : NULL;
+        if (at < end && *at == '"') {
+            at = close != NULL ? close + 1 : end;
+        } else if (at < end) {
+            depth += *at == '{' || *at == '[' ? 1 :
+                     *at == '}' || *at == ']' ? -1 : 0;
+            at++;
+        }
+    } while (at < end && (depth > 0 ||
+             (depth == 0 && strchr(",}] \t\r\n", *at) == NULL)));
+    return at;
+}
+
+const char * json_after(const char * close, const char * end) {
+    const char * colon = close != NULL ?
+                         close + 1 + strspn(close + 1, " \t\r\n") : end;
+    const char * value = colon < end && *colon == ':' ?
+                         colon + 1 + strspn(colon + 1, " \t\r\n") : end;
+    return value < end ? value : NULL;
+}
+
+const char * json_member(const char * object, const char * end,
+                         const char * key) {
+    const size_t n = strlen(key);
+    const char * at = object != NULL && object < end && *object == '{' ?
+                      object + 1 : end;
+    const char * found = NULL;
+    while (found == NULL && at < end && *at != '}') {
+        const char * close = *at == '"' ? json_close(at + 1, end) : NULL;
+        const char * value = json_after(close, end);
+        if (value != NULL && (size_t)(close - at - 1) == n &&
+            memcmp(at + 1, key, n) == 0) {
+            found = value;
+        }
+        at = value != NULL ? json_skip(value, end) : at + 1;
+    }
+    return found;
+}
+
 static size_t wav_chunk(const uint8_t * data, size_t size, const char * id,
                         size_t * length) {
     size_t at = 12;
