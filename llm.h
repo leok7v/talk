@@ -1,4 +1,5 @@
-#pragma once
+#ifndef LLM_H
+#define LLM_H
 #include "backend.h"
 
 struct turn {
@@ -61,3 +62,5 @@ struct llm * llm_open(const char * name, const char * path,
                       const char * const * options);
 const char * llm_listed(int32_t index);
 int llm_program(const char * name, const char * const * options);
+
+#endif

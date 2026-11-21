@@ -1,4 +1,5 @@
-#pragma once
+#ifndef UTILS_H
+#define UTILS_H
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -29,3 +30,5 @@ const char * json_after(const char * close, const char * end);
 const char * json_member(const char * object, const char * end,
                          const char * key);
 int32_t wav_samples(const uint8_t * data, size_t size, float ** samples);
+
+#endif

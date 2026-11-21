@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ASR_H
+#define ASR_H
 #include "backend.h"
 
 struct piece {
@@ -35,3 +36,5 @@ struct asr * asr_open(const char * name, const char * path,
                       const char * const * options);
 const char * asr_listed(int32_t index);
 int asr_program(const char * name, const char * const * options);
+
+#endif

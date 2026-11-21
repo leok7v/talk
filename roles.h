@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROLES_H
+#define ROLES_H
 #include "utils.h"
 
 #define INSTALL(kind, engine, ...)                                        \
@@ -8,3 +9,5 @@
 
 void roles_keys(char * keys, size_t size);
 void options_must(const char * const * options, const char * own);
+
+#endif

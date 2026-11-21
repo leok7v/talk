@@ -1,4 +1,5 @@
-#pragma once
+#ifndef BACKEND_H
+#define BACKEND_H
 #include "roles.h"
 
 struct gemm_args {
@@ -61,3 +62,5 @@ void cpu_blocks(struct backend * backend, const struct blocks * w,
                 const float * x, float * y);
 void cpu_blocks_part(const struct blocks * w, const float * x, float * y,
                      int32_t first, int32_t last);
+
+#endif

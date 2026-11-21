@@ -37,11 +37,11 @@ static double uniform(struct sampler * s) {
     return (double)(s->random >> 11) / 9007199254740992.0;
 }
 
-static struct piece encode(struct sampler * s, const char * text) {
+static struct tokens encode(struct sampler * s, const char * text) {
     const int32_t room = SAMPLER_TOKENS - s->pool_count;
     const int32_t count = gguf_special(s->g, text, s->pool + s->pool_count,
                                        room);
-    const struct piece p = { .at = s->pool_count, .count = count };
+    const struct tokens p = { .at = s->pool_count, .count = count };
     s->faulty = s->faulty || count >= room || count == 0;
     s->pool_count += count;
     return p;
@@ -345,7 +345,7 @@ static struct pick choice_kind(const struct sampler * s, int32_t token) {
     const struct step * step = &s->steps[s->at];
     struct pick p = { .token = token, .kind = INVALID, .term = -1 };
     for (int32_t i = 0; i < step->choices; i++) {
-        const struct piece * c = &step->choice[i];
+        const struct tokens * c = &step->choice[i];
         if (s->live[i] && s->index < c->count &&
             s->pool[c->at + s->index] == token) {
             p.kind = NORMAL;
@@ -500,7 +500,7 @@ static void advance(struct sampler * s) {
     enter(s);
 }
 
-static void fixed_from(struct sampler * s, struct piece piece,
+static void fixed_from(struct sampler * s, struct tokens piece,
                        int32_t index) {
     advance(s);
     s->current = piece;
@@ -534,7 +534,7 @@ static void choice_took(struct sampler * s, int32_t token) {
     const struct step * step = &s->steps[s->at];
     bool complete = false;
     for (int32_t i = 0; i < step->choices; i++) {
-        const struct piece * c = &step->choice[i];
+        const struct tokens * c = &step->choice[i];
         s->live[i] = s->live[i] && s->index < c->count &&
                      s->pool[c->at + s->index] == token;
         complete = complete || (s->live[i] && s->index + 1 == c->count);

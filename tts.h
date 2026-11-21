@@ -1,4 +1,5 @@
-#pragma once
+#ifndef TTS_H
+#define TTS_H
 #include "backend.h"
 
 struct tts {
@@ -19,3 +20,5 @@ struct tts_entry {
 struct tts * tts_open(const char * name, const char * path,
                       struct backend * backend,
                       const char * const * options);
+
+#endif

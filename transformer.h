@@ -1,4 +1,5 @@
-#pragma once
+#ifndef TRANSFORMER_H
+#define TRANSFORMER_H
 #include "llm.h"
 
 enum { GGUF_OWNED = 1024, GGUF_BLOCK = 32, GGUF_F32 = 0, GGUF_Q4_0 = 2,
@@ -168,7 +169,7 @@ int32_t chat_reply(struct chat * c, const struct gguf * g,
 void chat_content(struct chat * c, const struct gguf * g,
                   const struct format * f, const char * content);
 
-struct piece {
+struct tokens {
     int32_t at;
     int32_t count;
 };
@@ -179,9 +180,9 @@ struct step {
     int32_t high;
     int32_t choices;
     bool joined;
-    struct piece plain;
-    struct piece joint[SAMPLER_TERMS];
-    struct piece choice[SAMPLER_CHOICES];
+    struct tokens plain;
+    struct tokens joint[SAMPLER_TERMS];
+    struct tokens choice[SAMPLER_CHOICES];
     char text[SAMPLER_TEXT];
 };
 
@@ -196,7 +197,7 @@ struct sampler {
     int32_t pool_count;
     int32_t at;
     int32_t index;
-    struct piece current;
+    struct tokens current;
     int32_t sentences;
     int32_t length;
     int32_t limbo;
@@ -242,3 +243,5 @@ int32_t gguf_text(const struct gguf * g, char * text, int32_t used,
                   int32_t capacity, int32_t token);
 int32_t gguf_mark(const struct gguf * g, char * text, int32_t used,
                   int32_t capacity, int32_t token);
+
+#endif
