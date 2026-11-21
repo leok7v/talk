@@ -357,6 +357,11 @@ static void stored_test(const struct store * store) {
     expect(chat_load(&c, "test.copy") && c.fed_count == TOKENS &&
            c.track[1][3 * TOKENS - 1] == 3.5f && f.next == TOKENS,
            "chat_load takes a saved chat");
+    f.runs = 0;
+    c.pending[312] = 1001;
+    chat_feed(&c);
+    expect(f.runs == 2 && f.row[0] == 310 && f.count[0] == 5,
+           "a chat that came back has its checkpoints");
     other.model = 8;
     chat_close(&c);
     must(chat_open(fake_chat(&c, &f), 1024, &other), "chat");

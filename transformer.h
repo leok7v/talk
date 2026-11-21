@@ -51,6 +51,7 @@ struct mark {
     int32_t position;
     int32_t wanted;
     int32_t dropped;
+    bool moved;
     uint8_t * state;
 };
 
@@ -76,6 +77,8 @@ struct stored {
     int32_t dropped;
     int32_t mode;
     int32_t wanted[CHAT_MARKS];
+    int32_t position[CHAT_MARKS];
+    int32_t shifted[CHAT_MARKS];
 };
 
 struct chat {
@@ -106,6 +109,7 @@ struct chat {
     struct store store;
     struct stored * stored;
     uint8_t * slot;
+    uint8_t * kept_marks;
     float * track[CHAT_TRACKS];
     size_t head;
     int32_t synced;

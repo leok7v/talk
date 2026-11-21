@@ -710,7 +710,7 @@ void chat_attend(const struct attention * a, float * mix, const float * q,
     free(score);
 }
 
-static const uint32_t stored_magic = 0x54414c4b;
+static const uint32_t stored_magic = 0x54414c4c;
 
 static size_t row_bytes(const struct chat * c) {
     return (size_t)c->store.tracks * c->store.width * sizeof(float);
@@ -726,9 +726,10 @@ static size_t chat_place(struct chat * c, uint8_t * base) {
         c->fed = (int32_t *)(void *)(base + fed);
         c->starts = (int32_t *)(void *)(base + starts);
         c->slot = base + slot;
+        c->kept_marks = base + slot + c->store.state_size;
     }
-    return (slot + c->store.state_size + CHAT_HEAD - 1) / CHAT_HEAD *
-           CHAT_HEAD;
+    return (slot + (CHAT_MARKS + 1) * c->store.state_size + CHAT_HEAD - 1) /
+           CHAT_HEAD * CHAT_HEAD;
 }
 
 static size_t file_bytes(const struct chat * c) {
@@ -750,8 +751,15 @@ static void stored_take(struct chat * c) {
     c->dropped = h->dropped;
     c->mode = h->mode;
     for (int32_t i = 0; i < CHAT_MARKS; i++) {
-        c->marks[i].position = -1;
-        c->marks[i].wanted = h->wanted[i];
+        struct mark * m = &c->marks[i];
+        m->position = h->position[i];
+        m->wanted = h->wanted[i];
+        m->dropped = h->shifted[i];
+        m->moved = false;
+        if (m->position >= 0) {
+            memcpy(m->state, c->kept_marks + i * c->store.state_size,
+                   c->store.state_size);
+        }
     }
 }
 
@@ -793,7 +801,8 @@ bool chat_open(struct chat * c, int32_t context, const struct store * s) {
         *c->stored = (struct stored){
             .magic = stored_magic, .clean = 1, .model = s->model,
             .state_size = s->state_size, .tracks = s->tracks,
-            .width = s->width, .context = context, .wanted = { -1, -1, -1 }
+            .width = s->width, .context = context, .wanted = { -1, -1, -1 },
+            .position = { -1, -1, -1 }
         };
     }
     return made == CHAT_MARKS && c->scratch != NULL && base != NULL &&
@@ -822,7 +831,15 @@ void chat_commit(struct chat * c) {
     h->dropped = c->dropped;
     h->mode = c->mode;
     for (int32_t i = 0; i < CHAT_MARKS; i++) {
-        h->wanted[i] = c->marks[i].wanted;
+        struct mark * m = &c->marks[i];
+        if (m->moved && m->position >= 0) {
+            memcpy(c->kept_marks + i * c->store.state_size, m->state,
+                   c->store.state_size);
+        }
+        m->moved = false;
+        h->wanted[i] = m->wanted;
+        h->position[i] = m->position;
+        h->shifted[i] = m->dropped;
     }
     h->clean = 1;
 }
@@ -926,6 +943,7 @@ static void marks_save(struct chat * c) {
             c->save(c->engine, m->state);
             m->position = c->fed_count;
             m->dropped = c->dropped;
+            m->moved = true;
         }
     }
 }
