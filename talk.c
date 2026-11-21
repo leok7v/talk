@@ -75,7 +75,7 @@ static bool bytes_push(struct bytes * b, const void * data,
         b->capacity = grown;
     }
     const bool fits = b->length + size <= b->capacity;
-    if (fits) {
+    if (fits && size > 0) {
         memcpy(b->data + b->length, data, size);
         b->length += size;
     }

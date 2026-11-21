@@ -1386,6 +1386,8 @@ static void flow(struct supertonic * tts, float * x, int64_t size, int32_t n,
         tap(tts, x, size, "ve.step.%d", step);
         tts->used = mark;
     }
+    spoken->tag = NULL;
+    silent->tag = NULL;
 }
 
 static const float * vocoder_head(struct supertonic * tts, float * x,
@@ -1623,7 +1625,7 @@ static struct audio narrate(struct supertonic * tts, const char * text,
                             uint32_t seed, int32_t steps, float speed) {
     const int32_t limit = strcmp(lang, "ko") == 0 ? korean_chunk_limit :
                                                     chunk_limit;
-    const int32_t pause = (int32_t)(chunk_silence * sample_rate);
+    const int32_t pause = (int32_t)(chunk_silence * (double)sample_rate);
     const size_t  mark  = tts->used;
     struct chunks c     = chunk_open(&tts->weights, text, limit);
     struct audio  whole = { 0 };
@@ -1849,7 +1851,8 @@ int main(int argc, char ** argv) {
         must(file != NULL, "speech");
         wave_write(out, file, bytes);
         fprintf(stderr, "%s: %zu bytes, %.2f s of audio in %.2f s\n", out,
-                bytes, (double)(bytes - 44) / (2.0 * sample_rate), elapsed);
+                bytes, (double)(bytes - 44) / (2.0 * (double)sample_rate),
+                elapsed);
         if (engine->profile != NULL) {
             profile_print(engine);
         }

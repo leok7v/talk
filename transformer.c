@@ -72,7 +72,7 @@ static void table_close(struct table * t) {
 }
 
 static bool key_is(const uint8_t * key, uint64_t size, const char * name) {
-    return size == strlen(name) && memcmp(key, name, size) == 0;
+    return size == strlen(name) && memcmp(key, name, (size_t)size) == 0;
 }
 
 static void value_skip(struct gguf * g, uint32_t type);
@@ -102,8 +102,8 @@ static void tokens_read(struct gguf * g) {
     const uint8_t * p = g->cursor + 12;
     g->vocab_size = (int32_t)count;
     g->vocab = table_open(count);
-    g->token_text = calloc(count + 1, sizeof(uint8_t *));
-    g->token_size = calloc(count + 1, sizeof(int32_t));
+    g->token_text = calloc((size_t)count + 1, sizeof(uint8_t *));
+    g->token_size = calloc((size_t)count + 1, sizeof(int32_t));
     must(g->token_text != NULL && g->token_size != NULL, "memory");
     for (int32_t i = 0; i < g->vocab_size; i++) {
         g->token_size[i] = (int32_t)le64(p);
@@ -125,7 +125,7 @@ static void merges_read(struct gguf * g) {
 
 static void types_read(struct gguf * g) {
     const uint64_t count = le64(g->cursor + 4);
-    g->token_type = calloc(count + 1, sizeof(int32_t));
+    g->token_type = calloc((size_t)count + 1, sizeof(int32_t));
     must(g->token_type != NULL, "memory");
     for (uint64_t i = 0; i < count; i++) {
         g->token_type[i] = (int32_t)le32(g->cursor + 12 + i * 4);
@@ -219,7 +219,7 @@ const float * gguf_tensor(struct gguf * g, const char * format,
     if (p != NULL && type == GGUF_F32) {
         values = (const float *)(const void *)p;
     } else if (p != NULL && (type == GGUF_Q8_0 || type == GGUF_Q4_0)) {
-        float * decoded = floats(count);
+        float * decoded = floats((size_t)count);
         gguf_decode(decoded, p, count, type);
         values = decoded;
         own(g, decoded);
@@ -238,7 +238,7 @@ struct matrix gguf_matrix(struct gguf * g, const char * format,
     snprintf(name, sizeof name, format, layer);
     const uint8_t * p = gguf_info(g, name, &type, &count);
     const bool fine = p != NULL && (type == GGUF_Q8_0 || type == GGUF_Q4_0);
-    float * scale = floats(fine ? count / GGUF_BLOCK : 1);
+    float * scale = floats(fine ? (size_t)(count / GGUF_BLOCK) : 1);
     own(g, scale);
     g->faults += fine ? 0 : 1;
     if (fine) {
@@ -250,7 +250,7 @@ struct matrix gguf_matrix(struct gguf * g, const char * format,
         m.bits = type == GGUF_Q4_0 ? 4 : 8;
     }
     if (fine && !g->packed) {
-        float * values = floats(count);
+        float * values = floats((size_t)count);
         own(g, values);
         gguf_decode(values, p, count, type);
         m.values = values;
@@ -795,7 +795,7 @@ bool chat_open(struct chat * c, int32_t context, const struct store * s) {
     if (base != NULL) {
         chat_place(c, base);
     }
-    if (base != NULL && stored_fits(c, c->stored)) {
+    if (base != NULL && made == CHAT_MARKS && stored_fits(c, c->stored)) {
         stored_take(c);
     } else if (base != NULL) {
         *c->stored = (struct stored){

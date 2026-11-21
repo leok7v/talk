@@ -1127,7 +1127,7 @@ static void decoder_step(struct whistle * self, float * logits,
                          const struct beam * b) {
     const struct lanes mix = lanes_at(self, T_DECODER_LANES);
     struct node * now = node_at(self, b, b->length - 1);
-    float embed[DIM];
+    float embed[DIM] = { 0 };
     float stream[LANES * DIM];
     float u[DIM];
     float out[DIM];

@@ -3,7 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-void must(bool ok, const char * what);
+[[noreturn]] void fail(const char * what);
+#define must(ok, what) ((ok) ? (void)0 : fail(what))
 const char * guarded(void (* run)(void * context), void * context);
 const char * option(const char * const * options, const char * key,
                     const char * fallback);

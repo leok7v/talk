@@ -15,15 +15,13 @@ enum { RATE = 16000 };
 static _Thread_local jmp_buf * trap;
 static _Thread_local const char * failed;
 
-void must(bool ok, const char * what) {
-    if (!ok) {
-        fprintf(stderr, "talk: %s failed\n", what);
-        failed = what;
-        if (trap != NULL) {
-            longjmp(*trap, 1);
-        }
-        exit(1);
+void fail(const char * what) {
+    fprintf(stderr, "talk: %s failed\n", what);
+    failed = what;
+    if (trap != NULL) {
+        longjmp(*trap, 1);
     }
+    exit(1);
 }
 
 const char * guarded(void (* run)(void * context), void * context) {
@@ -372,10 +370,10 @@ int32_t wav_samples(const uint8_t * data, size_t size, float ** samples) {
             const int32_t channels = data[format + 2] | data[format + 3] << 8;
             const double rate = (double)le32(data + format + 4);
             const size_t frames = bytes / (size_t)(channels * 2);
-            count = (int32_t)((double)frames * RATE / rate);
+            count = (int32_t)((double)frames * (double)RATE / rate);
             *samples = floats((size_t)count);
             for (int32_t i = 0; i < count && frames > 0; i++) {
-                const double at = (double)i * rate / RATE;
+                const double at = (double)i * rate / (double)RATE;
                 const size_t a = (size_t)at < frames - 1 ? (size_t)at :
                                  frames - 1;
                 const size_t b = a + 1 < frames ? a + 1 : a;
