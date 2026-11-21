@@ -502,7 +502,8 @@ static int32_t decode(struct moonshine * self, const float * memory,
 
 static int32_t moonshine_transcribe(struct asr * asr, const float * samples,
                                     int32_t count, const char * language,
-                                    char * text, int32_t capacity) {
+                                    char * text, int32_t capacity,
+                                    struct pieces * pieces) {
     struct moonshine * self = (struct moonshine *)asr;
     const int32_t n = count < RATE * SECONDS ? count : RATE * SECONDS;
     const int32_t wanted = n / RATE * 13 / 2 + 8;
@@ -510,6 +511,9 @@ static int32_t moonshine_transcribe(struct asr * asr, const float * samples,
     int32_t made = 0;
     (void)language;
     text[0] = 0;
+    if (pieces != NULL) {
+        pieces->count = 0;
+    }
     if (n >= RATE / 10) {
         float * x = front(self, samples, n, &frames);
         for (int32_t l = 0; l < LAYERS; l++) {

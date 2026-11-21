@@ -106,6 +106,7 @@ and prints the known options.
 | `tokens=` | `256` | the most tokens of a reply |
 | `beam=` | `5` | the beams of the speech to text decoder, 1 to 8 |
 | `depth=` | `8` | the layers of the Whistle decoder, 2 to 8; fewer is faster |
+| `pieces=` | none | `./whistle pieces=1` prints a time and a score per piece of text |
 | `save=` | none | a file that keeps each upload of the page |
 | `page=` | `index.html` | the page file the server sends |
 | `model=` | the engine's own | the model file, for an engine program |
@@ -153,6 +154,12 @@ the top of `Makefile` name the installed backends and engines. To add
 an engine, write the file and add its name to the list of its role.
 The headers `backend.h`, `asr.h`, `llm.h` and `tts.h` hold the four
 roles.
+
+`transcribe` of `asr.h` takes a `struct pieces` that can be NULL.
+Whistle fills it with one entry per piece of the text, in text order.
+An entry has the byte offset of the piece in the text, its position
+in samples of the clip, and its log probability. A position is the
+start of a frame of 80 ms. Moonshine fills none.
 
 ## Check
 

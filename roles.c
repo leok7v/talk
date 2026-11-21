@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { PATH = 512 };
+enum { PATH = 512, PIECES = 1024 };
 
 #ifndef BACKEND_LIST
 #define BACKEND_LIST
@@ -150,11 +150,23 @@ const char * llm_listed(int32_t index) {
     return index >= 0 && index < count ? llm_list[index]->name : NULL;
 }
 
+static void pieces_print(const char * text, const struct pieces * pieces) {
+    for (int32_t i = 0; i < pieces->count; i++) {
+        const struct piece * p = &pieces->list[i];
+        const int32_t end = i + 1 < pieces->count ? p[1].offset :
+                            (int32_t)strlen(text);
+        printf("%7.2f s %7.2f %.*s\n", (double)p->sample / 16000.0,
+               (double)p->score, end - p->offset, text + p->offset);
+    }
+}
+
 int asr_program(const char * name, const char * const * options) {
     char text[8192];
     size_t size = 0;
     float * samples = NULL;
-    options_must(options, "wav language gemm model");
+    struct piece list[PIECES];
+    struct pieces pieces = { .list = list, .capacity = PIECES };
+    options_must(options, "wav language gemm model pieces");
     const uint8_t * data = file_map(option(options, "wav", "tmp/hello.wav"),
                                     &size);
     const int32_t count = data != NULL ? wav_samples(data, size, &samples) :
@@ -170,8 +182,11 @@ int asr_program(const char * name, const char * const * options) {
     const double started = seconds();
     const int32_t steps = asr->transcribe(asr, samples, count,
                                           option(options, "language", ""),
-                                          text, sizeof text);
+                                          text, sizeof text,
+                                          option(options, "pieces", NULL) !=
+                                          NULL ? &pieces : NULL);
     printf("%s\n", text);
+    pieces_print(text, &pieces);
     fprintf(stderr, "audio %.2f s, open %.2f s, transcribe %.2f s, "
             "%d steps\n", (double)count / 16000.0, started - opened,
             seconds() - started, steps);

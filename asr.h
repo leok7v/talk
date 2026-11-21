@@ -1,11 +1,24 @@
 #pragma once
 #include "backend.h"
 
+struct piece {
+    int32_t offset;
+    int32_t sample;
+    float score;
+};
+
+struct pieces {
+    struct piece * list;
+    int32_t capacity;
+    int32_t count;
+};
+
 struct asr {
     const char * name;
     int32_t (* transcribe)(struct asr * asr, const float * samples,
                            int32_t count, const char * language,
-                           char * text, int32_t capacity);
+                           char * text, int32_t capacity,
+                           struct pieces * pieces);
     void (* close)(struct asr * asr);
 };
 
