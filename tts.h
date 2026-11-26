@@ -4,8 +4,14 @@
 
 struct tts {
     const char * name;
+    int32_t rate;
     uint8_t * (* wave)(struct tts * tts, const char * text,
                        const char * voice, size_t * bytes);
+    int32_t (* stream)(struct tts * tts, const char * text,
+                       const char * voice,
+                       void (* heard)(void * who, const float * samples,
+                                      int32_t count),
+                       void * who);
     void (* close)(struct tts * tts);
 };
 

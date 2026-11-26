@@ -100,6 +100,11 @@ struct output {
     int32_t steps;
     struct pieces * pieces;
     const float * first;
+    void (* said)(void * who, const char * text, int32_t size);
+    void * who;
+    int32_t base;
+    int32_t written;
+    bool more;
 };
 
 struct memory {
@@ -1244,17 +1249,22 @@ static void order(struct candidate * list, int32_t count) {
     }
 }
 
+static void path_take(const struct whistle * self, const struct beam * b,
+                      int32_t length, struct result * r) {
+    r->length = length;
+    r->frame[0] = 0;
+    for (int32_t p = 0; p < length; p++) {
+        r->token[p] = node_at(self, b, p)->token;
+        r->gain[p] = node_at(self, b, p)->gain;
+        r->frame[p + 1] = node_at(self, b, p)->frame;
+    }
+}
+
 static void keep(const struct whistle * self, const struct beam * b,
                  float score, struct result * best) {
     if (score > best->score) {
         best->score = score;
-        best->length = b->length;
-        best->frame[0] = 0;
-        for (int32_t p = 0; p < b->length; p++) {
-            best->token[p] = node_at(self, b, p)->token;
-            best->gain[p] = node_at(self, b, p)->gain;
-            best->frame[p + 1] = node_at(self, b, p)->frame;
-        }
+        path_take(self, b, b->length, best);
     }
 }
 
@@ -1278,8 +1288,13 @@ static int32_t advance(struct whistle * self, const struct beam * cur,
     return live;
 }
 
+static void stream(struct whistle * self, const struct beam * live,
+                   int32_t count, const struct result * best,
+                   struct output * out);
+
 static int32_t search(struct whistle * self, const struct memory * m,
-                      int32_t rows, int32_t forced, struct result * best) {
+                      int32_t rows, int32_t forced, struct result * best,
+                      struct output * out) {
     struct beam * beams = calloc(2 * BEAMS, sizeof(struct beam));
     struct candidate list[BEAMS * BEAMS];
     float * logits = floats(VOCAB);
@@ -1304,6 +1319,7 @@ static int32_t search(struct whistle * self, const struct memory * m,
                         best);
         width -= take - count;
         flip = 1 - flip;
+        stream(self, beams + flip * BEAMS, count, best, out);
     }
     for (int32_t i = 0; i < count; i++) {
         const struct beam * b = &beams[flip * BEAMS + i];
@@ -1348,24 +1364,81 @@ static void piece_mark(struct output * out, int32_t sample, float score) {
     }
 }
 
+static void emit(struct whistle * self, struct output * out,
+                 const struct result * r, int32_t end) {
+    for (int32_t i = out->written; i < end; i++) {
+        piece_mark(out, out->base + r->frame[i] * STRIDE, r->gain[i]);
+        out->size = piece_write(self, out->text, out->size, out->capacity,
+                                r->token[i]);
+    }
+    if (end > out->written && out->said != NULL) {
+        out->text[out->size] = 0;
+        out->said(out->who, out->text, out->size);
+    }
+    out->written = end > out->written ? end : out->written;
+}
+
+static int32_t same_start(const struct whistle * self, const struct beam * a,
+                          const struct beam * b, int32_t length) {
+    int32_t same = 0;
+    while (same < length && same < b->length &&
+           node_at(self, a, same)->token == node_at(self, b, same)->token) {
+        same++;
+    }
+    return same;
+}
+
+static int32_t agreed(const struct whistle * self, const struct beam * live,
+                      int32_t count, const struct result * best) {
+    int32_t length = count > 0 ? live[0].length : 0;
+    for (int32_t i = 1; i < count; i++) {
+        length = same_start(self, &live[0], &live[i], length);
+    }
+    for (int32_t p = 0; best->score > -INFINITY && p < length; p++) {
+        length = p < best->length &&
+                 best->token[p] == node_at(self, &live[0], p)->token ?
+                 length : p;
+    }
+    return length;
+}
+
+static int32_t ready(const struct whistle * self, const struct result * r,
+                     const struct output * out) {
+    const int32_t stop = out->more ? sentence_end(self, r) : 0;
+    int32_t word = out->written;
+    for (int32_t i = out->written + 1; i < r->length; i++) {
+        word = piece_starts(self, r->token[i]) ? i : word;
+    }
+    return out->more ? stop + 1 : word;
+}
+
+static void stream(struct whistle * self, const struct beam * live,
+                   int32_t count, const struct result * best,
+                   struct output * out) {
+    const int32_t length = out->said != NULL ?
+                           agreed(self, live, count, best) : 0;
+    if (length > out->written + 1) {
+        struct result r = { 0 };
+        path_take(self, &live[0], length, &r);
+        emit(self, out, &r, ready(self, &r, out));
+    }
+}
+
 static int32_t clip(struct whistle * self, const float * samples,
                     int32_t count, int32_t forced, bool more,
                     struct output * out) {
-    const int32_t base = (int32_t)(samples - out->first);
     const int32_t frames = 1 + count / HOP;
     const int32_t all = ((((frames - 1) / 2 + 1) - 1) / 2 + 1 - 1) / 2 + 1;
     struct memory m = memory_open(self, samples, count);
     struct result best = { .score = -INFINITY };
+    out->base = (int32_t)(samples - out->first);
+    out->written = 2;
+    out->more = more;
     if (m.spread >= steady) {
-        out->steps += search(self, &m, all + all % 2, forced, &best);
+        out->steps += search(self, &m, all + all % 2, forced, &best, out);
     }
     const int32_t stop = more ? sentence_end(self, &best) : 0;
-    const int32_t last = stop > 0 ? stop + 1 : best.length;
-    for (int32_t i = 2; i < last; i++) {
-        piece_mark(out, base + best.frame[i] * STRIDE, best.gain[i]);
-        out->size = piece_write(self, out->text, out->size, out->capacity,
-                                best.token[i]);
-    }
+    emit(self, out, &best, stop > 0 ? stop + 1 : best.length);
     for (int32_t i = 0; i < self->node_count; i++) {
         free(self->nodes[i]);
     }
@@ -1395,12 +1468,15 @@ static int32_t window_end(const float * samples, int32_t at,
 static int32_t whistle_transcribe(struct asr * asr, const float * samples,
                                   int32_t count, const char * language,
                                   char * text, int32_t capacity,
-                                  struct pieces * pieces) {
+                                  struct pieces * pieces,
+                                  void (* said)(void * who, const char * text,
+                                                int32_t size),
+                                  void * who) {
     struct whistle * self = (struct whistle *)asr;
     const int32_t forced = language_tag(language != NULL ? language : "");
     struct output out = {
         .text = text, .capacity = capacity, .pieces = pieces,
-        .first = samples
+        .first = samples, .said = said, .who = who
     };
     int32_t at = 0;
     if (pieces != NULL) {

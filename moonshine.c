@@ -464,9 +464,27 @@ static int32_t piece_write(const struct moonshine * self, char * text,
     return at;
 }
 
+static bool word_start(const struct moonshine * self, int32_t token) {
+    const uint8_t * p = (const uint8_t *)self->pool + self->piece_at[token];
+    return token > EOS && word_mark(p, 0, self->piece_size[token]);
+}
+
+static void decode_said(char * text, int32_t size,
+                        void (* said)(void * who, const char * text,
+                                      int32_t size),
+                        void * who) {
+    text[size] = 0;
+    if (said != NULL && size > 0) {
+        said(who, text, size);
+    }
+}
+
 static int32_t decode(struct moonshine * self, const float * memory,
                       int32_t frames, int32_t limit, char * text,
-                      int32_t capacity) {
+                      int32_t capacity,
+                      void (* said)(void * who, const char * text,
+                                    int32_t size),
+                      void * who) {
     const size_t n = (size_t)frames * HIDDEN;
     float * memory_k = floats(LAYERS * n);
     float * memory_v = floats(LAYERS * n);
@@ -490,10 +508,13 @@ static int32_t decode(struct moonshine * self, const float * memory,
         layer_norm(x, x, self->decoder_norm, 1);
         linear(self, logits, x, self->embed, NULL, 1, VOCAB, HIDDEN);
         token = best(logits);
+        if (word_start(self, token)) {
+            decode_said(text, size, said, who);
+        }
         size = piece_write(self, text, size, capacity, token);
         count += token != EOS ? 1 : 0;
     }
-    text[size] = 0;
+    decode_said(text, size, said, who);
     free(memory_k);
     free(memory_v);
     free(logits);
@@ -503,7 +524,11 @@ static int32_t decode(struct moonshine * self, const float * memory,
 static int32_t moonshine_transcribe(struct asr * asr, const float * samples,
                                     int32_t count, const char * language,
                                     char * text, int32_t capacity,
-                                    struct pieces * pieces) {
+                                    struct pieces * pieces,
+                                    void (* said)(void * who,
+                                                  const char * text,
+                                                  int32_t size),
+                                    void * who) {
     struct moonshine * self = (struct moonshine *)asr;
     const int32_t n = count < RATE * SECONDS ? count : RATE * SECONDS;
     const int32_t wanted = n / RATE * 13 / 2 + 8;
@@ -521,7 +546,7 @@ static int32_t moonshine_transcribe(struct asr * asr, const float * samples,
         }
         layer_norm(x, x, self->encoder_norm, frames);
         made = decode(self, x, frames, wanted < TOKENS ? wanted : TOKENS,
-                      text, capacity);
+                      text, capacity, said, who);
         free(x);
     }
     return made;

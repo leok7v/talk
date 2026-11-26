@@ -475,7 +475,7 @@ static bool transcribe_with(struct bytes * json, int32_t index,
     const double started = seconds();
     if (asr != NULL) {
         asr->transcribe(asr, samples, count, language, transcript,
-                        sizeof transcript, NULL);
+                        sizeof transcript, NULL, NULL, NULL);
     }
     pthread_mutex_unlock(&asr_lock);
     if (asr != NULL) {

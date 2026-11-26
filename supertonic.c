@@ -24,7 +24,8 @@
 
 enum { name_capacity = 192, text_capacity = 1024, arena_floats = 1 << 26,
        sample_rate = 44100, style_heads = 2, field_groups = 4,
-       chunk_limit = 300, korean_chunk_limit = 120, span_capacity = 256,
+       chunk_limit = 300, korean_chunk_limit = 120, sentence_limit = 0,
+       span_capacity = 4096,
        arena_align = 32, widen_floats = 1 << 18, vocoder_slice = 256,
        q4_block = 32, q4_group = 8, q4_head = 20 };
 
@@ -106,7 +107,7 @@ struct condition {
     const float * keys;
     const float * values;
     int32_t       tokens;
-    const char *  tag;
+    char          tag[16];
 };
 
 struct voice {
@@ -218,7 +219,7 @@ static int32_t text_decompose(const uint32_t * raw, int32_t count,
         const bool    basic = raw[i] <= 0xFFFF;
         const int32_t from  = basic ? offsets[raw[i]] : 0;
         const int32_t size  = basic ? offsets[raw[i] + 1] - from : 0;
-        if (cp != NULL && size == 0) { cp[made] = raw[i]; }
+        if (cp != NULL && size <= 0) { cp[made] = raw[i]; }
         for (int32_t k = 0; cp != NULL && k < size; k++) {
             cp[made + k] = (uint32_t)parts[from + k];
         }
@@ -401,6 +402,26 @@ static int tensor_order(const void * left, const void * right) {
     return strcmp(a->name, b->name);
 }
 
+static int64_t record_bytes(const struct record * record) {
+    const int64_t rows   = record->shape[0] > 0 ? record->shape[0] : 1;
+    const int64_t blocks = (record->count / rows + q4_block - 1) / q4_block;
+    const int64_t packed = (blocks + q4_group - 1) / q4_group * q4_head +
+                           blocks * (q4_block / 2);
+    return record->bits == 4 ? rows * packed :
+           record->bits == 16 ? 2 * record->count : record->count;
+}
+
+static bool records_fit(const struct record * records, int64_t count,
+                        int64_t size) {
+    int64_t faults = 0;
+    for (int64_t i = 0; i < count; i++) {
+        faults += records[i].count < 0 || records[i].offset < 0 ||
+                  records[i].offset > size - record_bytes(&records[i]) ?
+                  1 : 0;
+    }
+    return faults == 0;
+}
+
 static struct pack pack_open(const char * path) {
     struct pack pack = { 0 };
     int64_t header = -1;
@@ -413,8 +434,15 @@ static struct pack pack_open(const char * path) {
         memcmp(map + 8 + header, "SUPERTON", 8) == 0) {
         const char * index = map + 8 + header;
         const struct record * records = (const void *)(index + 16);
+        const int64_t room = ((int64_t)pack.size - header - 24) /
+                             (int64_t)sizeof(struct record);
         memcpy(&pack.count, index + 8, sizeof pack.count);
-        pack.tensors = calloc((size_t)pack.count, sizeof(struct tensor));
+        pack.count = pack.count >= 0 && pack.count <= room &&
+                     records_fit(records, pack.count, (int64_t)pack.size) ?
+                     pack.count : 0;
+        pack.tensors = pack.count > 0 ?
+                       calloc((size_t)pack.count, sizeof(struct tensor)) :
+                       NULL;
         for (int64_t i = 0; pack.tensors != NULL && i < pack.count; i++) {
             pack.tensors[i] = (struct tensor){
                 .name = records[i].name, .count = records[i].count,
@@ -972,7 +1000,7 @@ static float * stack(struct supertonic * tts, float * x, int32_t c, int32_t n,
                      const char * tag, const char * at) {
     for (int32_t i = 0; has(&tts->weights, "%s.convnext.%d.gamma", at, i);
          i++) {
-        char layer[name_capacity];
+        char layer[2 * name_capacity];
         snprintf(layer, sizeof layer, "%s.convnext.%d", at, i);
         x = convnext(tts, x, c, n, dilations != NULL ? dilations[i] : 1,
                      causal, layer);
@@ -1237,7 +1265,8 @@ static void time_embedding(struct supertonic * tts, float * out, float t) {
     float * waves = arena(tts, 2 * half);
     float * h = arena(tts, wide);
     for (int32_t i = 0; i < half; i++) {
-        __sincosf(t * time_scale * freqs[i], &waves[i], &waves[half + i]);
+        waves[i] = sinf(t * time_scale * freqs[i]);
+        waves[half + i] = cosf(t * time_scale * freqs[i]);
     }
     conv(tts, h, waves, 2 * half, 1, w0,
          weight(w, FIELD ".time_encoder.mlp.0.linear.bias"), 1, false);
@@ -1260,9 +1289,8 @@ static void rotate(struct supertonic * tts, float * x, int32_t c, int32_t n,
         float * a = x + (pair / half * 2 * half + pair % half) * n + t;
         float * b = a + (int64_t)half * n;
         const float angle = (float)t / (float)n * theta->data[pair % half];
-        float sine = 0.0f;
-        float cosine = 0.0f;
-        __sincosf(angle, &sine, &cosine);
+        const float sine = sinf(angle);
+        const float cosine = cosf(angle);
         const float real = *a * cosine - *b * sine;
         *b = *a * sine + *b * cosine;
         *a = real;
@@ -1323,7 +1351,7 @@ static float * field_block(struct supertonic * tts, float * x, int32_t c,
             text_condition(tts, x, c, n, condition, at);
         } else {
             float * styled = arena(tts, (int64_t)c * n);
-            strlcat(at, ".attention", sizeof at);
+            snprintf(at, sizeof at, FIELD ".main_blocks.%d.attention", block);
             style_attention(tts, styled, x, n, condition, at);
             axpy(x, 1.0f, styled, (int64_t)c * n);
             tts->used = mark;
@@ -1367,14 +1395,11 @@ static void flow(struct supertonic * tts, float * x, int64_t size, int32_t n,
     const struct tensor * out = weight(&tts->weights,
                                        FIELD ".time_encoder.mlp.2.linear"
                                              ".weight");
-    char tags[2][16];
-    spoken->tag = tags[0];
-    silent->tag = tags[1];
     for (int32_t step = 0; step < steps; step++) {
         const size_t mark = tts->used;
         float * time = arena(tts, out->shape[0]);
-        snprintf(tags[0], sizeof tags[0], "%d.c", step);
-        snprintf(tags[1], sizeof tags[1], "%d.u", step);
+        snprintf(spoken->tag, sizeof spoken->tag, "%d.c", step);
+        snprintf(silent->tag, sizeof silent->tag, "%d.u", step);
         time_embedding(tts, time, (float)step / (float)steps);
         tap(tts, time, out->shape[0], "ve.%d.time", step);
         const float * with = velocity(tts, x, n, time, spoken);
@@ -1386,8 +1411,6 @@ static void flow(struct supertonic * tts, float * x, int64_t size, int32_t n,
         tap(tts, x, size, "ve.step.%d", step);
         tts->used = mark;
     }
-    spoken->tag = NULL;
-    silent->tag = NULL;
 }
 
 static const float * vocoder_head(struct supertonic * tts, float * x,
@@ -1579,7 +1602,7 @@ static struct audio synthesize(struct supertonic * tts,
                                const char * lang, const struct voice * voice,
                                struct mt19937 * mt, int32_t steps,
                                float speed) {
-    int32_t ids[text_capacity];
+    int32_t ids[text_capacity] = { 0 };
     const int32_t n = text_ids(text, count, lang, &tts->weights, ids,
                                text_capacity);
     struct audio audio = { .count = -1 };
@@ -1656,6 +1679,57 @@ static struct audio narrate(struct supertonic * tts, const char * text,
     return whole;
 }
 
+static int32_t recite(struct supertonic * tts, const char * text,
+                      const struct voice * voice,
+                      void (* heard)(void * who, const float * samples,
+                                     int32_t count),
+                      void * who) {
+    const int32_t pause = (int32_t)(chunk_silence * (double)sample_rate);
+    float *       quiet = arena(tts, pause);
+    const size_t  mark  = tts->used;
+    struct chunks c     = chunk_open(&tts->weights, text, sentence_limit);
+    int32_t       total = 0;
+    struct mt19937 mt;
+    mt_seed(&mt, tts->seed);
+    fill(quiet, 0.0f, pause);
+    while (total >= 0 && chunk_next(&c)) {
+        if (total > 0) {
+            heard(who, quiet, pause);
+            total += pause;
+        }
+        const struct audio part = synthesize(tts, c.cp, c.length, tts->lang,
+                                             voice, &mt, tts->steps,
+                                             tts->speed);
+        if (part.count >= 0) {
+            heard(who, part.samples, part.count);
+        }
+        total = part.count >= 0 ? total + part.count : -1;
+        tts->used = mark;
+    }
+    free(c.raw);
+    free(c.cp);
+    return total;
+}
+
+static int32_t supertonic_stream(struct tts * handle, const char * text,
+                                 const char * voice,
+                                 void (* heard)(void * who,
+                                                const float * samples,
+                                                int32_t count),
+                                 void * who) {
+    struct supertonic * tts = (struct supertonic *)handle;
+    volatile int32_t total = -1;
+    tts->used = 0;
+    if (setjmp(tts->trap) != 0) {
+        fprintf(stderr, "talk: supertonic fault in the model or the arena\n");
+    } else if (heard != NULL &&
+               has(&tts->weights, "voice.%s.ttl", voice_code(voice))) {
+        const struct voice chosen = voice_open(tts, voice);
+        total = recite(tts, text, &chosen, heard, who);
+    }
+    return total;
+}
+
 static uint8_t * supertonic_wave(struct tts * handle, const char * text,
                                  const char * voice, size_t * bytes) {
     struct supertonic * tts = (struct supertonic *)handle;
@@ -1670,8 +1744,8 @@ static uint8_t * supertonic_wave(struct tts * handle, const char * text,
                                            tts->seed, tts->steps, tts->speed);
         if (audio.count > 0) {
             file = wave(audio.samples, audio.count, sample_rate, bytes);
-            free(audio.samples);
         }
+        free(audio.samples);
     }
     return file;
 }
@@ -1692,7 +1766,8 @@ static struct tts * supertonic_open(const char * path,
     struct supertonic * tts = calloc(1, sizeof *tts);
     if (tts != NULL) {
         tts->tts = (struct tts){
-            .name = "supertonic", .wave = supertonic_wave,
+            .name = "supertonic", .rate = sample_rate,
+            .wave = supertonic_wave, .stream = supertonic_stream,
             .close = supertonic_close
         };
         tts->backend = backend;
@@ -1811,6 +1886,38 @@ static void profile_print(struct supertonic * tts) {
     }
 }
 
+struct heard {
+    float * samples;
+    int32_t count;
+    double  started;
+    double  first;
+};
+
+static void hear(void * who, const float * samples, int32_t count) {
+    struct heard * h = who;
+    h->first = h->count == 0 ? seconds() - h->started : h->first;
+    h->samples = realloc(h->samples,
+                         (size_t)(h->count + count) * sizeof(float));
+    must(h->samples != NULL, "memory");
+    memcpy(h->samples + h->count, samples, (size_t)count * sizeof(float));
+    h->count += count;
+}
+
+static uint8_t * spoken(struct tts * tts, const char * text,
+                        const char * voice, bool streamed, size_t * bytes,
+                        double * first) {
+    struct heard h = { .started = seconds() };
+    uint8_t * file = NULL;
+    if (streamed && tts->stream(tts, text, voice, hear, &h) > 0) {
+        file = wave(h.samples, h.count, sample_rate, bytes);
+    } else if (!streamed) {
+        file = tts->wave(tts, text, voice, bytes);
+    }
+    *first = streamed ? h.first : seconds() - h.started;
+    free(h.samples);
+    return file;
+}
+
 static void wave_write(const char * out, const uint8_t * file,
                        size_t bytes) {
     FILE * sink = fopen(out, "wb");
@@ -1822,7 +1929,7 @@ int main(int argc, char ** argv) {
     static struct profile profile = { .module = module_other };
     const char * const * options = (const char * const *)argv + 1;
     (void)argc;
-    options_must(options, "text voice out profile gate gemm model");
+    options_must(options, "text voice out profile gate gemm model stream");
     const char * golden = option(options, "gate", NULL);
     const char * out = option(options, "out", "tmp/speak.wav");
     struct backend * backend = backend_open(option(options, "gemm", NULL),
@@ -1843,16 +1950,19 @@ int main(int argc, char ** argv) {
             profile.entered = seconds();
             engine->profile = &profile;
         }
+        double first = 0.0;
         const double started = seconds();
-        uint8_t * file = tts->wave(tts, option(options, "text",
-                                               "Hello world."),
-                                   option(options, "voice", "F1"), &bytes);
+        uint8_t * file = spoken(tts, option(options, "text", "Hello world."),
+                                option(options, "voice", "F1"),
+                                option(options, "stream", NULL) != NULL,
+                                &bytes, &first);
         const double elapsed = seconds() - started;
         must(file != NULL, "speech");
         wave_write(out, file, bytes);
-        fprintf(stderr, "%s: %zu bytes, %.2f s of audio in %.2f s\n", out,
-                bytes, (double)(bytes - 44) / (2.0 * (double)sample_rate),
-                elapsed);
+        fprintf(stderr, "%s: %zu bytes, %.2f s of audio in %.2f s, the "
+                "first audio after %.2f s\n", out, bytes,
+                (double)(bytes - 44) / (2.0 * (double)sample_rate), elapsed,
+                first);
         if (engine->profile != NULL) {
             profile_print(engine);
         }

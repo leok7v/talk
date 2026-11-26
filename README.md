@@ -82,9 +82,11 @@ alone:
 
     ./whistle wav=clip.wav
     ./moonshine wav=clip.wav
+    ./whistle wav=clip.wav stream=1 beam=1
     ./falcon text="What is the capital of France?"
     ./qwen text="Why is the sky blue?" think=2 script='S{1,2}'
     ./supertonic text="Hello world." voice=F1 out=hello.wav
+    ./supertonic text="One. Two. Three." voice=M9 stream=1
 
 Options are `key=value` words. An unknown option stops the program
 and prints the known options.
@@ -160,6 +162,19 @@ Whistle fills it with one entry per piece of the text, in text order.
 An entry has the byte offset of the piece in the text, its position
 in samples of the clip, and its log probability. A position is the
 start of a frame of 80 ms. Moonshine fills none.
+
+`transcribe` also takes a function `said` and a pointer `who`, which
+can be NULL. The engine calls `said` with the whole text so far each
+time more words are final, so the caller has words before the end. A
+word that went out does not change. With `beam=1` the words come one
+by one. With the default beam of 5 a word waits until all beams agree
+on it, so the words come in a few parts.
+
+`stream` of `tts.h` gives the speech one sentence at a time, to a
+function of the caller, with 0.3 s of silence between 2 sentences.
+The first audio comes after the first sentence, not after the whole
+text. The field `rate` is the sample rate. `./supertonic stream=1`
+prints when the first audio came.
 
 ## Check
 

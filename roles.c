@@ -150,6 +150,18 @@ const char * llm_listed(int32_t index) {
     return index >= 0 && index < count ? llm_list[index]->name : NULL;
 }
 
+struct heard {
+    int32_t size;
+    double started;
+};
+
+static void hear(void * who, const char * text, int32_t size) {
+    struct heard * h = who;
+    fprintf(stderr, "%7.2f s +%.*s\n", seconds() - h->started,
+            (int)(size - h->size), text + h->size);
+    h->size = size;
+}
+
 static void pieces_print(const char * text, const struct pieces * pieces) {
     for (int32_t i = 0; i < pieces->count; i++) {
         const struct piece * p = &pieces->list[i];
@@ -166,7 +178,8 @@ int asr_program(const char * name, const char * const * options) {
     float * samples = NULL;
     struct piece list[PIECES];
     struct pieces pieces = { .list = list, .capacity = PIECES };
-    options_must(options, "wav language gemm model pieces");
+    struct heard heard = { 0 };
+    options_must(options, "wav language gemm model pieces stream");
     const uint8_t * data = file_map(option(options, "wav", "tmp/hello.wav"),
                                     &size);
     const int32_t count = data != NULL ? wav_samples(data, size, &samples) :
@@ -180,11 +193,14 @@ int asr_program(const char * name, const char * const * options) {
                                 options);
     must(asr != NULL, name);
     const double started = seconds();
+    heard.started = started;
     const int32_t steps = asr->transcribe(asr, samples, count,
                                           option(options, "language", ""),
                                           text, sizeof text,
                                           option(options, "pieces", NULL) !=
-                                          NULL ? &pieces : NULL);
+                                          NULL ? &pieces : NULL,
+                                          option(options, "stream", NULL) !=
+                                          NULL ? hear : NULL, &heard);
     printf("%s\n", text);
     pieces_print(text, &pieces);
     fprintf(stderr, "audio %.2f s, open %.2f s, transcribe %.2f s, "

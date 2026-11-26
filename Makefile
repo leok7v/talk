@@ -7,7 +7,7 @@ LLM      = falcon qwen
 TTS      = supertonic
 
 FLAGS_Darwin = -fobjc-arc
-FLAGS_Linux  = -D_GNU_SOURCE -D__sincosf=sincosf -I/usr/include/openblas
+FLAGS_Linux  = -D_GNU_SOURCE -I/usr/include/openblas
 LIBS_Darwin  = -framework Accelerate -framework Metal -framework Foundation
 LIBS_hip     = -L$(ROCM)/lib -lamdhip64 -Wl,-rpath,$(ROCM)/lib -lstdc++
 LIBS_Linux   = -lopenblas -lgomp -lm $(LIBS_$(HIP))

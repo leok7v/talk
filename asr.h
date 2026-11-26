@@ -19,7 +19,10 @@ struct asr {
     int32_t (* transcribe)(struct asr * asr, const float * samples,
                            int32_t count, const char * language,
                            char * text, int32_t capacity,
-                           struct pieces * pieces);
+                           struct pieces * pieces,
+                           void (* said)(void * who, const char * text,
+                                         int32_t size),
+                           void * who);
     void (* close)(struct asr * asr);
 };
 
