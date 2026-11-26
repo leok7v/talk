@@ -1886,38 +1886,6 @@ static void profile_print(struct supertonic * tts) {
     }
 }
 
-struct heard {
-    float * samples;
-    int32_t count;
-    double  started;
-    double  first;
-};
-
-static void hear(void * who, const float * samples, int32_t count) {
-    struct heard * h = who;
-    h->first = h->count == 0 ? seconds() - h->started : h->first;
-    h->samples = realloc(h->samples,
-                         (size_t)(h->count + count) * sizeof(float));
-    must(h->samples != NULL, "memory");
-    memcpy(h->samples + h->count, samples, (size_t)count * sizeof(float));
-    h->count += count;
-}
-
-static uint8_t * spoken(struct tts * tts, const char * text,
-                        const char * voice, bool streamed, size_t * bytes,
-                        double * first) {
-    struct heard h = { .started = seconds() };
-    uint8_t * file = NULL;
-    if (streamed && tts->stream(tts, text, voice, hear, &h) > 0) {
-        file = wave(h.samples, h.count, sample_rate, bytes);
-    } else if (!streamed) {
-        file = tts->wave(tts, text, voice, bytes);
-    }
-    *first = streamed ? h.first : seconds() - h.started;
-    free(h.samples);
-    return file;
-}
-
 static void wave_write(const char * out, const uint8_t * file,
                        size_t bytes) {
     FILE * sink = fopen(out, "wb");
@@ -1925,11 +1893,9 @@ static void wave_write(const char * out, const uint8_t * file,
     fclose(sink);
 }
 
-int main(int argc, char ** argv) {
+static int inspect(const char * const * options) {
     static struct profile profile = { .module = module_other };
-    const char * const * options = (const char * const *)argv + 1;
-    (void)argc;
-    options_must(options, "text voice out profile gate gemm model stream");
+    options_must(options, "text voice out profile gate gemm model");
     const char * golden = option(options, "gate", NULL);
     const char * out = option(options, "out", "tmp/speak.wav");
     struct backend * backend = backend_open(option(options, "gemm", NULL),
@@ -1946,31 +1912,27 @@ int main(int argc, char ** argv) {
         status = gate(engine, golden) != 0;
     } else {
         size_t bytes = 0;
-        if (option(options, "profile", NULL) != NULL) {
-            profile.entered = seconds();
-            engine->profile = &profile;
-        }
-        double first = 0.0;
-        const double started = seconds();
-        uint8_t * file = spoken(tts, option(options, "text", "Hello world."),
-                                option(options, "voice", "F1"),
-                                option(options, "stream", NULL) != NULL,
-                                &bytes, &first);
-        const double elapsed = seconds() - started;
+        profile.entered = seconds();
+        engine->profile = &profile;
+        uint8_t * file = tts->wave(tts, option(options, "text",
+                                               "Hello world."),
+                                   option(options, "voice", "F1"), &bytes);
         must(file != NULL, "speech");
         wave_write(out, file, bytes);
-        fprintf(stderr, "%s: %zu bytes, %.2f s of audio in %.2f s, the "
-                "first audio after %.2f s\n", out, bytes,
-                (double)(bytes - 44) / (2.0 * (double)sample_rate), elapsed,
-                first);
-        if (engine->profile != NULL) {
-            profile_print(engine);
-        }
+        profile_print(engine);
         free(file);
     }
     tts->close(tts);
     backend->close(backend);
     return status;
+}
+
+int main(int argc, char ** argv) {
+    const char * const * options = (const char * const *)argv + 1;
+    const bool own = option(options, "gate", NULL) != NULL ||
+                     option(options, "profile", NULL) != NULL;
+    (void)argc;
+    return own ? inspect(options) : tts_run("supertonic", options);
 }
 
 #endif

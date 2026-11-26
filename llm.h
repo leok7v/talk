@@ -61,6 +61,6 @@ struct llm * llm_open(const char * name, const char * path,
                       struct backend * backend,
                       const char * const * options);
 const char * llm_listed(int32_t index);
-int llm_program(const char * name, const char * const * options);
+int llm_run(const char * name, const char * const * options);
 
 #endif

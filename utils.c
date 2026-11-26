@@ -399,9 +399,10 @@ bool wav_write(const char * path, const float * samples, int32_t count,
     size_t written = sink != NULL ? fwrite(header, sizeof header, 1, sink) :
                      0;
     for (int32_t i = 0; sink != NULL && i < count; i++) {
-        const float v = samples[i] > 1.0f ? 1.0f :
-                        samples[i] < -1.0f ? -1.0f : samples[i];
-        const int16_t pcm = (int16_t)lrintf(v * 32767.0f);
+        const float scaled = samples[i] * 2147483648.0f;
+        const int16_t pcm = (double)scaled >= 2147483647.0 ? INT16_MAX :
+                            scaled <= -2147483648.0f ? INT16_MIN :
+                            (int16_t)(lrintf(scaled) >> 16);
         written += fwrite(&pcm, sizeof pcm, 1, sink);
     }
     if (sink != NULL) {

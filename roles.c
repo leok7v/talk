@@ -184,7 +184,7 @@ static void pieces_print(const char * text, const struct pieces * pieces) {
     }
 }
 
-int asr_program(const char * name, const char * const * options) {
+int asr_run(const char * name, const char * const * options) {
     char text[8192];
     size_t size = 0;
     float * samples = NULL;
@@ -224,7 +224,7 @@ int asr_program(const char * name, const char * const * options) {
     return 0;
 }
 
-int ss_program(const char * name, const char * const * options) {
+int ss_run(const char * name, const char * const * options) {
     char path[PATH];
     size_t size = 0;
     float * samples = NULL;
@@ -259,7 +259,67 @@ int ss_program(const char * name, const char * const * options) {
     return 0;
 }
 
-int llm_program(const char * name, const char * const * options) {
+struct sound {
+    float * samples;
+    int32_t count;
+    double started;
+    double first;
+};
+
+static void listen(void * who, const float * samples, int32_t count) {
+    struct sound * s = who;
+    s->first = s->count == 0 ? seconds() - s->started : s->first;
+    s->samples = realloc(s->samples,
+                         (size_t)(s->count + count) * sizeof(float));
+    must(s->samples != NULL, "memory");
+    memcpy(s->samples + s->count, samples, (size_t)count * sizeof(float));
+    s->count += count;
+}
+
+static bool bytes_write(const char * path, const uint8_t * data,
+                        size_t size) {
+    FILE * sink = fopen(path, "wb");
+    const bool done = sink != NULL && fwrite(data, 1, size, sink) == size;
+    if (sink != NULL) {
+        fclose(sink);
+    }
+    return done;
+}
+
+int tts_run(const char * name, const char * const * options) {
+    size_t bytes = 0;
+    struct sound sound = { 0 };
+    options_must(options, "text voice out stream gemm model");
+    const char * text = option(options, "text", "Hello world.");
+    const char * voice = option(options, "voice", "F1");
+    const char * out = option(options, "out", "tmp/speak.wav");
+    const bool streamed = option(options, "stream", NULL) != NULL;
+    struct backend * backend = backend_open(option(options, "gemm", NULL),
+                                            options);
+    must(backend != NULL, "gemm");
+    struct tts * tts = tts_open(name, option(options, "model", NULL), backend,
+                                options);
+    must(tts != NULL, name);
+    sound.started = seconds();
+    uint8_t * file = streamed ? NULL : tts->wave(tts, text, voice, &bytes);
+    const int32_t made = streamed ?
+        tts->stream(tts, text, voice, listen, &sound) :
+        file != NULL ? (int32_t)((bytes - 44) / 2) : -1;
+    const double spent = seconds() - sound.started;
+    must(made > 0, "speech");
+    must(streamed ? wav_write(out, sound.samples, sound.count, tts->rate) :
+         bytes_write(out, file, bytes), out);
+    fprintf(stderr, "%s: %.2f s of audio in %.2f s, the first audio after "
+            "%.2f s\n", out, (double)made / (double)tts->rate, spent,
+            streamed ? sound.first : spent);
+    free(file);
+    free(sound.samples);
+    tts->close(tts);
+    backend->close(backend);
+    return 0;
+}
+
+int llm_run(const char * name, const char * const * options) {
     char answer[8192];
     char thought[8192] = "";
     char keys[256];

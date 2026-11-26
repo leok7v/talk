@@ -598,7 +598,7 @@ INSTALL(llm, falcon,
 
 int main(int argc, char ** argv) {
     (void)argc;
-    return llm_program("falcon", (const char * const *)argv + 1);
+    return llm_run("falcon", (const char * const *)argv + 1);
 }
 
 #endif

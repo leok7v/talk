@@ -962,7 +962,7 @@ INSTALL(ss, ss,
 
 int main(int argc, char ** argv) {
     (void)argc;
-    return ss_program("ss", (const char * const *)argv + 1);
+    return ss_run("ss", (const char * const *)argv + 1);
 }
 
 #endif

@@ -26,5 +26,6 @@ struct tts_entry {
 struct tts * tts_open(const char * name, const char * path,
                       struct backend * backend,
                       const char * const * options);
+int tts_run(const char * name, const char * const * options);
 
 #endif

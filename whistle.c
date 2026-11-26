@@ -1661,7 +1661,7 @@ INSTALL(asr, whistle, .pack = "leok7v/whistle/whistle.cact",
 
 int main(int argc, char ** argv) {
     (void)argc;
-    return asr_program("whistle", (const char * const *)argv + 1);
+    return asr_run("whistle", (const char * const *)argv + 1);
 }
 
 #endif

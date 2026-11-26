@@ -38,6 +38,6 @@ struct asr * asr_open(const char * name, const char * path,
                       struct backend * backend,
                       const char * const * options);
 const char * asr_listed(int32_t index);
-int asr_program(const char * name, const char * const * options);
+int asr_run(const char * name, const char * const * options);
 
 #endif

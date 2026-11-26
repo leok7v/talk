@@ -19,6 +19,6 @@ struct ss_entry {
 
 struct ss * ss_open(const char * name, const char * path,
                     struct backend * backend, const char * const * options);
-int ss_program(const char * name, const char * const * options);
+int ss_run(const char * name, const char * const * options);
 
 #endif

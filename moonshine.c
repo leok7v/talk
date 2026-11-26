@@ -641,7 +641,7 @@ INSTALL(asr, moonshine,
 
 int main(int argc, char ** argv) {
     (void)argc;
-    return asr_program("moonshine", (const char * const *)argv + 1);
+    return asr_run("moonshine", (const char * const *)argv + 1);
 }
 
 #endif

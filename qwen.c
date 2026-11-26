@@ -610,7 +610,7 @@ INSTALL(llm, qwen,
 
 int main(int argc, char ** argv) {
     (void)argc;
-    return llm_program("qwen", (const char * const *)argv + 1);
+    return llm_run("qwen", (const char * const *)argv + 1);
 }
 
 #endif
