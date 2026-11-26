@@ -388,6 +388,28 @@ int32_t wav_samples(const uint8_t * data, size_t size, float ** samples) {
     return count;
 }
 
+bool wav_write(const char * path, const float * samples, int32_t count,
+               int32_t rate) {
+    const uint32_t data = (uint32_t)count * 2;
+    const uint32_t header[11] = {
+        0x46464952, 36 + data, 0x45564157, 0x20746d66, 16, 0x00010001,
+        (uint32_t)rate, (uint32_t)rate * 2, 0x00100002, 0x61746164, data
+    };
+    FILE * sink = fopen(path, "wb");
+    size_t written = sink != NULL ? fwrite(header, sizeof header, 1, sink) :
+                     0;
+    for (int32_t i = 0; sink != NULL && i < count; i++) {
+        const float v = samples[i] > 1.0f ? 1.0f :
+                        samples[i] < -1.0f ? -1.0f : samples[i];
+        const int16_t pcm = (int16_t)lrintf(v * 32767.0f);
+        written += fwrite(&pcm, sizeof pcm, 1, sink);
+    }
+    if (sink != NULL) {
+        fclose(sink);
+    }
+    return written == (size_t)count + 1;
+}
+
 int32_t turn_shift(const char * word) {
     return strcmp(word, "soft") == 0 ? SHIFT_SOFT :
            strcmp(word, "exact") == 0 ? SHIFT_EXACT : SHIFT_NONE;

@@ -3,5 +3,6 @@
 #include "asr.h"
 #include "llm.h"
 #include "tts.h"
+#include "ss.h"
 
 #endif

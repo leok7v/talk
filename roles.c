@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { PATH = 512, PIECES = 1024 };
+enum { PATH = 512, PIECES = 1024, VOICES = 8 };
 
 #ifndef BACKEND_LIST
 #define BACKEND_LIST
@@ -16,6 +16,9 @@ enum { PATH = 512, PIECES = 1024 };
 #endif
 #ifndef TTS_LIST
 #define TTS_LIST
+#endif
+#ifndef SS_LIST
+#define SS_LIST
 #endif
 
 #define LIST(kind, engines)                                               \
@@ -64,6 +67,9 @@ LLM_LIST
 #define X(engine) extern const struct tts_entry engine##_tts;
 TTS_LIST
 #undef X
+#define X(engine) extern const struct ss_entry engine##_ss;
+SS_LIST
+#undef X
 
 #define X(engine) &engine##_backend,
 LIST(backend, BACKEND_LIST)
@@ -77,11 +83,15 @@ LIST(llm, LLM_LIST)
 #define X(engine) &engine##_tts,
 LIST(tts, TTS_LIST)
 #undef X
+#define X(engine) &engine##_ss,
+LIST(ss, SS_LIST)
+#undef X
 
 FIND(backend)
 FIND(asr)
 FIND(llm)
 FIND(tts)
+FIND(ss)
 
 struct backend * backend_open(const char * name,
                               const char * const * options) {
@@ -100,6 +110,7 @@ static struct backend * shared(void) {
 OPEN(asr)
 OPEN(llm)
 OPEN(tts)
+OPEN(ss)
 
 static void keys_add(char * keys, size_t size, const char * more) {
     const char * at = more;
@@ -119,6 +130,7 @@ void roles_keys(char * keys, size_t size) {
     KEYS(asr)
     KEYS(llm)
     KEYS(tts)
+    KEYS(ss)
 }
 
 void options_must(const char * const * options, const char * own) {
@@ -207,6 +219,41 @@ int asr_program(const char * name, const char * const * options) {
             "%d steps\n", (double)count / 16000.0, started - opened,
             seconds() - started, steps);
     asr->close(asr);
+    backend->close(backend);
+    free(samples);
+    return 0;
+}
+
+int ss_program(const char * name, const char * const * options) {
+    char path[PATH];
+    size_t size = 0;
+    float * samples = NULL;
+    float * voices[VOICES] = { 0 };
+    options_must(options, "wav out gemm model");
+    const char * out = option(options, "out", "tmp/ss");
+    const uint8_t * data = file_map(option(options, "wav", "tmp/hello.wav"),
+                                    &size);
+    const int32_t count = data != NULL ? wav_samples(data, size, &samples) :
+                          0;
+    must(count > 0, "wav");
+    struct backend * backend = backend_open(option(options, "gemm", NULL),
+                                            options);
+    must(backend != NULL, "gemm");
+    struct ss * ss = ss_open(name, option(options, "model", NULL), backend,
+                             options);
+    must(ss != NULL, name);
+    const double started = seconds();
+    const int32_t made = ss->separate(ss, samples, count, voices, VOICES);
+    const double spent = seconds() - started;
+    for (int32_t k = 0; k < made; k++) {
+        snprintf(path, sizeof path, "%s.%d.wav", out, k + 1);
+        must(wav_write(path, voices[k], count, 16000), path);
+        printf("%s\n", path);
+        free(voices[k]);
+    }
+    fprintf(stderr, "audio %.2f s, %d voices, separate %.2f s\n",
+            (double)count / 16000.0, made, spent);
+    ss->close(ss);
     backend->close(backend);
     free(samples);
     return 0;

@@ -5,6 +5,7 @@ BACKENDS = blas cpu $(if $(filter Darwin,$(OS)),metal) $(HIP)
 ASR      = whistle moonshine
 LLM      = falcon qwen
 TTS      = supertonic
+SS       = ss
 
 FLAGS_Darwin = -fobjc-arc
 FLAGS_Linux  = -D_GNU_SOURCE -I/usr/include/openblas
@@ -16,7 +17,8 @@ CC      = clang -std=c2x -O3 -flto -march=native -Wall -Wextra -Wpedantic \
 LIBS    = $(LIBS_$(OS))
 SHARED  = utils.c roles.c $(wildcard $(addsuffix .c,$(BACKENDS)) \
           $(addsuffix .m,$(BACKENDS))) $(if $(HIP),tmp/hip.o)
-HEADERS = talk.h asr.h llm.h tts.h backend.h roles.h utils.h transformer.h
+HEADERS = talk.h asr.h llm.h tts.h ss.h backend.h roles.h utils.h \
+          transformer.h
 CHAT    = transformer.c sampler.c
 ENGINES = $(addsuffix .c,$(ASR) $(LLM) $(TTS)) $(CHAT)
 BACKS   = -D'BACKEND_LIST=$(foreach e,$(BACKENDS),X($(e)))'
@@ -24,7 +26,7 @@ LISTS   = $(BACKS) -D'ASR_LIST=$(foreach e,$(ASR),X($(e)))' \
           -D'LLM_LIST=$(foreach e,$(LLM),X($(e)))' \
           -D'TTS_LIST=$(foreach e,$(TTS),X($(e)))'
 
-all: talk $(ASR) $(LLM) $(TTS) bench test
+all: talk $(ASR) $(LLM) $(TTS) $(SS) bench test
 
 talk: $(HEADERS) talk.c $(ENGINES) $(SHARED)
 	$(CC) -DNO_MAIN $(LISTS) talk.c $(ENGINES) $(SHARED) -o talk $(LIBS)
@@ -37,6 +39,9 @@ $(LLM): %: %.c $(HEADERS) $(CHAT) $(SHARED)
 
 $(TTS): %: %.c $(HEADERS) $(SHARED)
 	$(CC) $(BACKS) -D'TTS_LIST=X($@)' $< $(SHARED) -o $@ $(LIBS)
+
+$(SS): %: %.c $(HEADERS) $(SHARED)
+	$(CC) $(BACKS) -D'SS_LIST=X($@)' $< $(SHARED) -o $@ $(LIBS)
 
 bench: bench.c $(HEADERS) $(addsuffix .c,$(LLM)) $(CHAT) $(SHARED)
 	$(CC) -DNO_MAIN $(BACKS) -D'LLM_LIST=$(foreach e,$(LLM),X($(e)))' \

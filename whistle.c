@@ -1033,22 +1033,18 @@ static void path_view(struct whistle * self, const struct beam * b,
     }
 }
 
-static void decoder_attention(struct whistle * self, float * x, int32_t l,
-                              const struct beam * b) {
+static void attend_own(struct whistle * self, float * mix, int32_t l,
+                       const struct beam * b, const float * raw) {
     const int32_t base = T_DECODER + l * DECODER_STRIDE;
     const int32_t at = b->length - 1;
-    const struct attention a = {
-        .q = base + 1, .k = base + 2, .v = base + 3, .gate = base + 9,
-        .out = base + 10, .q_norm = self->tensors[base + 7],
-        .k_norm = self->tensors[base + 8]
-    };
     struct node * now = node_at(self, b, at);
     const float * past_q[TAPS];
     const float * past_k[TAPS];
     const float * past_v[TAPS];
-    float h[DIM];
     float q[HEADS * QK];
-    float mix[DIM];
+    memcpy(now->raw_q[l], raw, sizeof now->raw_q[l]);
+    memcpy(now->raw_k[l], raw + HEADS * QK, sizeof now->raw_k[l]);
+    memcpy(now->raw_v[l], raw + (HEADS + GROUPS) * QK, sizeof now->raw_v[l]);
     for (int32_t j = 0; j < TAPS; j++) {
         const struct node * node = at - j >= 0 ? node_at(self, b, at - j) :
                                    NULL;
@@ -1056,110 +1052,188 @@ static void decoder_attention(struct whistle * self, float * x, int32_t l,
         past_k[j] = node != NULL ? node->raw_k[l] : NULL;
         past_v[j] = node != NULL ? node->raw_v[l] : NULL;
     }
-    norm(h, x, self->tensors[base], 1, DIM);
-    product(self, now->raw_q[l], h, a.q, 0, HEADS * QK, 1);
-    product(self, now->raw_k[l], h, a.k, 0, GROUPS * QK, 1);
-    product(self, now->raw_v[l], h, a.v, 0, GROUPS * VD, 1);
     tapped(q, past_q, self->tensors[base + 4], HEADS * QK);
     tapped(now->key[l], past_k, self->tensors[base + 5], GROUPS * QK);
     tapped(now->value[l], past_v, self->tensors[base + 6], GROUPS * VD);
-    norm(q, q, a.q_norm, HEADS, QK);
-    norm(now->key[l], now->key[l], a.k_norm, GROUPS, QK);
+    norm(q, q, self->tensors[base + 7], HEADS, QK);
+    norm(now->key[l], now->key[l], self->tensors[base + 8], GROUPS, QK);
     rope(self, q, HEADS, at);
     rope(self, now->key[l], GROUPS, at);
     path_view(self, b, l);
     attend(mix, q, self->view_k, self->view_v, at + 1, GROUPS);
-    gated(self, h, mix, h, &a, 1);
-    norm(h, h, self->tensors[base + 11], 1, DIM);
-    for (int32_t d = 0; d < DIM; d++) {
-        x[d] += sigmoid(self->tensors[base + 12][0]) * h[d];
+}
+
+static void decoder_attention(struct whistle * self, float * x, int32_t l,
+                              const struct beam * beams, int32_t count) {
+    const int32_t base = T_DECODER + l * DECODER_STRIDE;
+    const int32_t raw = (HEADS + GROUPS) * QK + GROUPS * VD;
+    const struct attention a = {
+        .gate = base + 9, .out = base + 10
+    };
+    float * h = floats((size_t)count * DIM);
+    float * q = floats((size_t)count * HEADS * QK);
+    float * k = floats((size_t)count * GROUPS * QK);
+    float * v = floats((size_t)count * GROUPS * VD);
+    float * all = floats((size_t)count * raw);
+    float * mix = floats((size_t)count * DIM);
+    norm(h, x, self->tensors[base], count, DIM);
+    product(self, q, h, base + 1, 0, HEADS * QK, count);
+    product(self, k, h, base + 2, 0, GROUPS * QK, count);
+    product(self, v, h, base + 3, 0, GROUPS * VD, count);
+    for (int32_t b = 0; b < count; b++) {
+        float * row = all + (size_t)b * raw;
+        memcpy(row, q + (size_t)b * HEADS * QK, HEADS * QK * sizeof(float));
+        memcpy(row + HEADS * QK, k + (size_t)b * GROUPS * QK,
+               GROUPS * QK * sizeof(float));
+        memcpy(row + (HEADS + GROUPS) * QK, v + (size_t)b * GROUPS * VD,
+               GROUPS * VD * sizeof(float));
+        attend_own(self, mix + (size_t)b * DIM, l, &beams[b], row);
+    }
+    gated(self, h, mix, h, &a, count);
+    norm(h, h, self->tensors[base + 11], count, DIM);
+    for (size_t i = 0; i < (size_t)count * DIM; i++) {
+        x[i] += sigmoid(self->tensors[base + 12][0]) * h[i];
+    }
+    free(h);
+    free(q);
+    free(k);
+    free(v);
+    free(all);
+    free(mix);
+}
+
+static void weights(float * score, float * total, int32_t frames) {
+    float top = -INFINITY;
+    float sum = 0.0f;
+    for (int32_t s = 0; s < frames; s++) {
+        top = fmaxf(top, score[s]);
+    }
+    for (int32_t s = 0; s < frames; s++) {
+        score[s] = expf((score[s] - top) / sqrtf((float)QK));
+        sum += score[s];
+    }
+    for (int32_t s = 0; s < frames; s++) {
+        score[s] /= sum;
+        total[s] += score[s];
     }
 }
 
-static int32_t peak(const float * q, const float * k, int32_t count) {
-    float total[FRAMES] = { 0 };
-    float score[FRAMES];
+static int32_t peak(const float * total, int32_t frames) {
     int32_t pick = 0;
-    for (int32_t h = 0; h < HEADS; h++) {
-        float top = -INFINITY;
-        float sum = 0.0f;
-        for (int32_t s = 0; s < count; s++) {
-            score[s] = dot(q + h * QK, k + ((size_t)s * HEADS + h) * QK, QK);
-            top = fmaxf(top, score[s]);
-        }
-        for (int32_t s = 0; s < count; s++) {
-            score[s] = expf((score[s] - top) / sqrtf((float)QK));
-            sum += score[s];
-        }
-        for (int32_t s = 0; s < count; s++) {
-            total[s] += score[s] / sum;
-        }
-    }
-    for (int32_t s = 1; s < count; s++) {
+    for (int32_t s = 1; s < frames; s++) {
         pick = total[s] > total[pick] ? s : pick;
     }
     return pick;
 }
 
-static void decoder_cross(struct whistle * self, float * x, int32_t l,
-                          const struct memory * m, int32_t rows,
-                          struct node * now) {
-    const int32_t base = T_CROSS + l * CROSS_STRIDE;
-    const struct attention a = {
-        .q = base + 1, .gate = base + 4, .out = base + 5,
-        .q_norm = self->tensors[base + 6]
-    };
-    float h[DIM];
-    float q[HEADS * QK];
-    float mix[DIM];
-    norm(h, x, self->tensors[base], 1, DIM);
-    product(self, q, h, a.q, 0, HEADS * QK, 1);
-    norm(q, q, a.q_norm, HEADS, QK);
-    if (l == LAYERS - 1) {
-        now->frame = peak(q, m->k + (size_t)l * rows * HEADS * QK, m->length);
+static void attend_memory(struct whistle * self, float * mix, const float * q,
+                          const float * k, const float * v, int32_t frames,
+                          int32_t count, float * total) {
+    float * score = floats((size_t)count * frames);
+    memset(mix, 0, (size_t)count * DIM * sizeof(float));
+    for (int32_t h = 0; h < HEADS; h++) {
+        const struct gemm_args scores = {
+            .a = q + h * QK, .b = k + h * QK, .c = score, .m = count,
+            .n = frames, .k = QK, .lda = HEADS * QK, .ldb = HEADS * QK,
+            .ldc = frames, .tb = true
+        };
+        const struct gemm_args mixed = {
+            .a = score, .b = v + h * VD, .c = mix + h * VD, .m = count,
+            .n = VD, .k = frames, .lda = frames, .ldb = HEADS * VD,
+            .ldc = DIM
+        };
+        memset(score, 0, (size_t)count * frames * sizeof(float));
+        self->backend->gemm(self->backend, &scores);
+        for (int32_t b = 0; b < count; b++) {
+            weights(score + (size_t)b * frames, total + (size_t)b * frames,
+                    frames);
+        }
+        self->backend->gemm(self->backend, &mixed);
     }
-    attend(mix, q, m->k + (size_t)l * rows * HEADS * QK,
-           m->v + (size_t)l * rows * HEADS * VD, m->length, HEADS);
-    gated(self, h, mix, h, &a, 1);
-    norm(h, h, self->tensors[base + 8], 1, DIM);
-    for (int32_t d = 0; d < DIM; d++) {
-        x[d] += sigmoid(self->tensors[base + 9][0]) * h[d];
-    }
+    free(score);
 }
 
-static void decoder_step(struct whistle * self, float * logits,
-                         const struct memory * m, int32_t rows,
-                         const struct beam * b) {
-    const struct lanes mix = lanes_at(self, T_DECODER_LANES);
-    struct node * now = node_at(self, b, b->length - 1);
+static void decoder_cross(struct whistle * self, float * x, int32_t l,
+                          const struct memory * m, int32_t rows,
+                          const struct beam * beams, int32_t count) {
+    const int32_t base = T_CROSS + l * CROSS_STRIDE;
+    const struct attention a = {
+        .gate = base + 4, .out = base + 5
+    };
+    const float * k = m->k + (size_t)l * rows * HEADS * QK;
+    const float * v = m->v + (size_t)l * rows * HEADS * VD;
+    float * h = floats((size_t)count * DIM);
+    float * q = floats((size_t)count * HEADS * QK);
+    float * mix = floats((size_t)count * DIM);
+    float * total = floats((size_t)count * m->length);
+    norm(h, x, self->tensors[base], count, DIM);
+    product(self, q, h, base + 1, 0, HEADS * QK, count);
+    norm(q, q, self->tensors[base + 6], count * HEADS, QK);
+    attend_memory(self, mix, q, k, v, m->length, count, total);
+    for (int32_t b = 0; b < count && l == LAYERS - 1; b++) {
+        node_at(self, &beams[b], beams[b].length - 1)->frame =
+            peak(total + (size_t)b * m->length, m->length);
+    }
+    gated(self, h, mix, h, &a, count);
+    norm(h, h, self->tensors[base + 8], count, DIM);
+    for (size_t i = 0; i < (size_t)count * DIM; i++) {
+        x[i] += sigmoid(self->tensors[base + 9][0]) * h[i];
+    }
+    free(h);
+    free(q);
+    free(mix);
+    free(total);
+}
+
+static void decoder_enter(struct whistle * self, const struct beam * b,
+                          float * stream, float * key, float * value) {
     float embed[DIM] = { 0 };
-    float stream[LANES * DIM];
-    float u[DIM];
-    float out[DIM];
-    float gate[GATES];
-    float key[SITES * DIM];
-    float value[SITES * DIM];
-    row_decode(self, embed, T_EMBED, now->token);
+    row_decode(self, embed, T_EMBED, node_at(self, b, b->length - 1)->token);
     for (int32_t i = 0; i < LANES * DIM; i++) {
         stream[i] = embed[i % DIM] * sqrtf((float)DIM);
     }
     engram(self, b, key, value);
+}
+
+static void decoder_step(struct whistle * self, float * logits,
+                         const struct memory * m, int32_t rows,
+                         const struct beam * beams, int32_t count) {
+    const struct lanes mix = lanes_at(self, T_DECODER_LANES);
+    const int32_t sites = SITES * DIM;
+    float * stream = floats((size_t)count * LANES * DIM);
+    float * u = floats((size_t)count * DIM);
+    float * out = floats((size_t)count * DIM);
+    float * gate = floats((size_t)count * GATES);
+    float * key = floats((size_t)count * sites);
+    float * value = floats((size_t)count * sites);
+    for (int32_t b = 0; b < count; b++) {
+        decoder_enter(self, &beams[b], stream + (size_t)b * LANES * DIM,
+                      key + (size_t)b * sites, value + (size_t)b * sites);
+    }
     for (int32_t i = 0; i < self->depth; i++) {
         const int32_t l = self->layers[i];
         const int32_t base = T_DECODER + l * DECODER_STRIDE;
         const struct hadamard h = hadamard_at(self, base + 14);
-        lanes_enter(self, &mix, l, i % LANES, stream, u, gate, 1);
-        memcpy(out, u, sizeof out);
-        if (l % 4 == 3) {
-            recall(out, key + l / 4 * DIM, value + l / 4 * DIM);
+        lanes_enter(self, &mix, l, i % LANES, stream, u, gate, count);
+        memcpy(out, u, (size_t)count * DIM * sizeof(float));
+        for (int32_t b = 0; b < count && l % 4 == 3; b++) {
+            recall(out + (size_t)b * DIM,
+                   key + (size_t)b * sites + l / 4 * DIM,
+                   value + (size_t)b * sites + l / 4 * DIM);
         }
-        decoder_attention(self, out, l, b);
-        decoder_cross(self, out, l, m, rows, now);
-        hadamard_add(self, out, self->tensors[base + 13], &h, 1, 1.0f);
-        lanes_leave(stream, u, out, gate, 1);
+        decoder_attention(self, out, l, beams, count);
+        decoder_cross(self, out, l, m, rows, beams, count);
+        hadamard_add(self, out, self->tensors[base + 13], &h, count, 1.0f);
+        lanes_leave(stream, u, out, gate, count);
     }
-    lanes_mean(out, stream, self->tensors[T_FINAL], 1);
-    product(self, logits, out, T_EMBED, 0, VOCAB, 1);
+    lanes_mean(out, stream, self->tensors[T_FINAL], count);
+    product(self, logits, out, T_EMBED, 0, VOCAB, count);
+    free(stream);
+    free(u);
+    free(out);
+    free(gate);
+    free(key);
+    free(value);
 }
 
 static int32_t best(const float * logits, int32_t from, int32_t to) {
@@ -1297,7 +1371,7 @@ static int32_t search(struct whistle * self, const struct memory * m,
                       struct output * out) {
     struct beam * beams = calloc(2 * BEAMS, sizeof(struct beam));
     struct candidate list[BEAMS * BEAMS];
-    float * logits = floats(VOCAB);
+    float * logits = floats((size_t)BEAMS * VOCAB);
     int32_t flip = 0;
     int32_t count = 1;
     int32_t width = self->beams;
@@ -1308,9 +1382,10 @@ static int32_t search(struct whistle * self, const struct memory * m,
     while (count > 0 && width > 0 && beams[flip * BEAMS].length <= TOKENS) {
         struct beam * cur = beams + flip * BEAMS;
         int32_t made = 0;
+        decoder_step(self, logits, m, rows, cur, count);
         for (int32_t i = 0; i < count; i++) {
-            decoder_step(self, logits, m, rows, &cur[i]);
-            made = candidates(list, made, logits, &cur[i], i, forced, width);
+            made = candidates(list, made, logits + (size_t)i * VOCAB, &cur[i],
+                              i, forced, width);
         }
         steps += count;
         order(list, made);

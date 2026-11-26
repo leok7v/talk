@@ -12,14 +12,16 @@ OpenBLAS on Linux.
 | text to speech | Supertonic 3 | `supertonic.c` | 112 MB |
 | speech to text, for a compare | Moonshine tiny, English | `moonshine.c` | 108 MB |
 | chat, an experiment | Qwen3.5 0.8B | `qwen.c` | 812 MB |
+| speech separation, 2 to 5 voices | SR-CorrNet | `ss.c` | 56 MB |
 
 ## Models
 
     ./download.sh
 
 The script asks where the model files go, then asks one time and
-downloads the 4 models of the voice chat, about 355 MB. One more
-question is for the Qwen chat model, 812 MB.
+downloads the 4 models of the voice chat, about 355 MB. Two more
+questions are for the Qwen chat model, 812 MB, and the speech
+separation model, 56 MB.
 
 After a yes to the first question the files go under `huggingface.co`
 in the home directory. The path is the user and the repo of the
@@ -30,6 +32,7 @@ model's URL:
     ~/huggingface.co/leok7v/supertonic/supertonic-q8.safetensors
     ~/huggingface.co/leok7v/moonshine-tiny/model.safetensors
     ~/huggingface.co/leok7v/Qwen3.5-0.8B-Astra-GGUF/Qwen3.5-0.8B-Astra-Q8_0.gguf
+    ~/huggingface.co/leok7v/sr-corrnet-ss/sr-corrnet-ss-2-5spk.safetensors
 
 After a no the files go under `models` in the current directory, in
 the same form, and nothing outside the directory changes:
@@ -42,7 +45,7 @@ download with no question:
     ./download.sh models -y
 
 The word `models` is the directory, `-y` is a yes to the 4 models,
-and `-a` takes the Qwen model too.
+and `-a` takes the Qwen model and the separation model too.
 
 The model files are in these repos:
 
@@ -51,6 +54,7 @@ The model files are in these repos:
 - https://huggingface.co/leok7v/supertonic
 - https://huggingface.co/leok7v/moonshine-tiny
 - https://huggingface.co/leok7v/Qwen3.5-0.8B-Astra-GGUF
+- https://huggingface.co/leok7v/sr-corrnet-ss
 
 Run the server with `llm=qwen` for the Qwen model, or pick the engine
 on the page.
@@ -87,6 +91,7 @@ alone:
     ./qwen text="Why is the sky blue?" think=2 script='S{1,2}'
     ./supertonic text="Hello world." voice=F1 out=hello.wav
     ./supertonic text="One. Two. Three." voice=M9 stream=1
+    ./ss wav=mix.wav out=voice
 
 Options are `key=value` words. An unknown option stops the program
 and prints the known options.
@@ -149,6 +154,36 @@ drops the oldest messages and feeds the rest again. With `soft` the
 engine drops them from its cache and feeds nothing again. The soft
 form is fast and can cost answers.
 
+## The beam of Whistle
+
+Whistle keeps the 5 texts with the highest score while it decodes, and
+gives the best one at the end. The option `beam=` sets the count, from
+1 to 8. With `beam=1` the decoder takes the token with the highest
+score at each step and keeps no other text. That form is the greedy decode.
+
+Keep the default of 5 for the best text. Pick `beam=1` for speed, and
+for a stream that gives the words one by one. The server takes
+`beam=` at its start, for all requests. A program that opens the
+engine gives `beam=` in its options.
+
+| clip, Apple M3 | beam of 5 | beam of 1 |
+|---|---|---|
+| 8.3 s, 3 sentences | 0.44 s | 0.24 s |
+| 27 s | 1.48 s | 0.75 s |
+| 55 s | 3.29 s | 1.94 s |
+
+A beam of 1 is about 2 times faster. The decoder runs all beams of one
+step together, so a wide beam costs less than its width. The cost of a
+beam of 1 is in the text, in some cases. On 7 clips of speech from
+`supertonic.c` the 2 settings gave the same words. On 4 clips from a
+real microphone the beam of 5 heard one clip better. A beam of 5 gave
+"Oh, you're doing it today." and a beam of 1 gave "I'll eat the next
+day."
+
+With a stream, a word goes out when all beams agree on it. At a beam
+of 1 that is each word. At a beam of 5 a weak text can stay among the
+5 for many steps. So the words come in a few parts, most at the end.
+
 ## Engines
 
 An engine is one file that ends with an `INSTALL` line. The lists at
@@ -166,9 +201,15 @@ start of a frame of 80 ms. Moonshine fills none.
 `transcribe` also takes a function `said` and a pointer `who`, which
 can be NULL. The engine calls `said` with the whole text so far each
 time more words are final, so the caller has words before the end. A
-word that went out does not change. With `beam=1` the words come one
-by one. With the default beam of 5 a word waits until all beams agree
-on it, so the words come in a few parts.
+word that went out does not change. The beam of Whistle sets the size
+of the parts, see the section on the beam.
+
+`separate` of `ss.h` splits a mix of 2 to 5 voices into one signal per
+voice, at 16 kHz. The model counts the voices. The program `ss` writes
+one WAV per voice, the name of `out=` with 1, 2 and so on. The model
+works at 8 kHz, so a voice has no sound over 4 kHz. On mixes of the
+voices of `supertonic.c` Whistle read 2 to 4 voices well, and 5 voices
+badly.
 
 `stream` of `tts.h` gives the speech one sentence at a time, to a
 function of the caller, with 0.3 s of silence between 2 sentences.
@@ -221,7 +262,7 @@ error is JSON: `{"error": "..."}`.
 
 The code of this repo is under the MIT licence, see `LICENSE`.
 
-Two files follow the code of other authors. No file is a copy.
+Three files follow the code of other authors. No file is a copy.
 
 `whistle.c` follows the Python of github.com/cactus-compute/cactus,
 which is under the Apache License, Version 2.0:
@@ -247,9 +288,26 @@ github.com/ggml-org/llama.cpp, which is under the MIT License:
 > The above copyright notice and this permission notice shall be
 > included in all copies or substantial portions of the Software.
 
+`ss.c` follows the Python of github.com/dmlguq456/SR_CorrNet_SS, which
+is under the MIT License:
+
+> Copyright (c) 2026 Uihyeop Shin
+>
+> Permission is hereby granted, free of charge, to any person obtaining
+> a copy of this software and associated documentation files (the
+> "Software"), to deal in the Software without restriction, including
+> without limitation the rights to use, copy, modify, merge, publish,
+> distribute, sublicense, and/or sell copies of the Software, and to
+> permit persons to whom the Software is furnished to do so, subject to
+> the following conditions:
+>
+> The above copyright notice and this permission notice shall be
+> included in all copies or substantial portions of the Software.
+
 The models have their own licences. Each model file is in a repo of
 leok7v on huggingface.co. Four of them are copies of the files of the
-authors.
+authors, and the separation model is the checkpoint of the authors in
+one safetensors file.
 
 | model | the authors | licence |
 |---|---|---|
@@ -258,5 +316,6 @@ authors.
 | Moonshine tiny | moonshine-ai/moonshine-tiny | MIT |
 | Qwen3.5 0.8B | JonathanColetti/Qwen3.5-0.8B-Astra-WeightEdit | Apache 2.0 |
 | Supertonic 3 | Supertone/supertonic-3 | BigScience Open RAIL-M |
+| SR-CorrNet | shinuh/sr-corrnet-ss-1ch-wsj-var-2-5spk | MIT |
 
 Read each licence before you give a model to another person.

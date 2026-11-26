@@ -7,7 +7,8 @@
 # ~/huggingface.co, in the user and repo directories of each model's
 # URL. After a no they go under ./models in the same form. The engines
 # look in ./models first. -y answers yes to the download of the 4
-# models of the voice chat. -a also takes the Qwen chat model.
+# models of the voice chat. -a also takes the Qwen chat model and the
+# speech separation model.
 home="$HOME/huggingface.co"
 here=models
 url=https://huggingface.co
@@ -65,9 +66,12 @@ leok7v/supertonic:supertonic-q8.safetensors:112
 leok7v/moonshine-tiny:model.safetensors:108
 leok7v/moonshine-tiny:tokenizer.json:2"
 qwen="leok7v/Qwen3.5-0.8B-Astra-GGUF:Qwen3.5-0.8B-Astra-Q8_0.gguf:812"
+split="leok7v/sr-corrnet-ss:sr-corrnet-ss-2-5spk.safetensors:56"
 missing "$voice"
 wanted=$list
 missing "$qwen"
+wanted=$wanted$list
+missing "$split"
 if [ -z "$root" ] && [ -n "$wanted$list" ]; then
     if ask "download: create the directories under $home?"; then
         root=$home
@@ -89,5 +93,12 @@ if [ -z "$list" ]; then
     echo "download: the Qwen chat model is on this machine"
 elif [ "$all" = yes ] || { [ "$yes" = no ] &&
     ask "download: also get the Qwen chat model, about $total MB?"; }; then
+    fetch || exit 1
+fi
+missing "$split"
+if [ -z "$list" ]; then
+    echo "download: the speech separation model is on this machine"
+elif [ "$all" = yes ] || { [ "$yes" = no ] &&
+    ask "download: also get the separation model, about $total MB?"; }; then
     fetch || exit 1
 fi

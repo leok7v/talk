@@ -30,5 +30,7 @@ const char * json_after(const char * close, const char * end);
 const char * json_member(const char * object, const char * end,
                          const char * key);
 int32_t wav_samples(const uint8_t * data, size_t size, float ** samples);
+bool wav_write(const char * path, const float * samples, int32_t count,
+               int32_t rate);
 
 #endif
