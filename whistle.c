@@ -265,9 +265,8 @@ static void linear(struct whistle * self, float * y, const float * x,
                    const float * w, int32_t rows, int32_t out, int32_t in) {
     const struct gemm_args g = {
         .a = x, .b = w, .c = y, .m = rows, .n = out, .k = in, .lda = in,
-        .ldb = in, .ldc = out, .tb = true
+        .ldb = in, .ldc = out, .tb = true, .fresh = true
     };
-    memset(y, 0, (size_t)rows * out * sizeof(float));
     self->backend->gemm(self->backend, &g);
 }
 
@@ -1130,19 +1129,17 @@ static void attend_memory(struct whistle * self, float * mix, const float * q,
                           const float * k, const float * v, int32_t frames,
                           int32_t count, float * total) {
     float * score = floats((size_t)count * frames);
-    memset(mix, 0, (size_t)count * DIM * sizeof(float));
     for (int32_t h = 0; h < HEADS; h++) {
         const struct gemm_args scores = {
             .a = q + h * QK, .b = k + h * QK, .c = score, .m = count,
             .n = frames, .k = QK, .lda = HEADS * QK, .ldb = HEADS * QK,
-            .ldc = frames, .tb = true
+            .ldc = frames, .tb = true, .fresh = true
         };
         const struct gemm_args mixed = {
             .a = score, .b = v + h * VD, .c = mix + h * VD, .m = count,
             .n = VD, .k = frames, .lda = frames, .ldb = HEADS * VD,
-            .ldc = DIM
+            .ldc = DIM, .fresh = true
         };
-        memset(score, 0, (size_t)count * frames * sizeof(float));
         self->backend->gemm(self->backend, &scores);
         for (int32_t b = 0; b < count; b++) {
             weights(score + (size_t)b * frames, total + (size_t)b * frames,
@@ -1579,9 +1576,22 @@ static void whistle_close(struct asr * asr) {
     free(self);
 }
 
+static size_t record_bytes(const uint8_t * record) {
+    const size_t rows = le32(record + 4);
+    const size_t groups = (le32(record + 8) + GROUP - 1) / GROUP;
+    const size_t packed = rows * groups * (GROUP * le32(record + 40) / 8 + 2);
+    size_t count = 1;
+    for (int32_t d = 0; d < record[1]; d++) {
+        count *= le32(record + 4 + d * 4);
+    }
+    return record[0] == CQ ? packed : record[0] == FP32 ? count * 4 :
+           record[0] == FP16 ? count * 2 : 1;
+}
+
 static bool whistle_valid(const struct whistle * self) {
     const uint8_t * f = self->file;
-    const bool head = f != NULL && self->size > HEADER && le32(f) == TAG &&
+    const size_t table = HEADER + 28 * 4 + (size_t)TENSORS * RECORD;
+    const bool head = f != NULL && self->size > table && le32(f) == TAG &&
                       le32(f + 4) == TENSORS && le32(f + 8) == 28 &&
                       le32(f + 20) == VOCAB && le32(f + 28) == DIM;
     int32_t faults = head ? 0 : 1;
@@ -1589,6 +1599,9 @@ static bool whistle_valid(const struct whistle * self) {
         const uint8_t * record = f + HEADER + 28 * 4 + (size_t)i * RECORD;
         const uint32_t bits = le32(record + 40);
         faults += record[0] == CQ && bits != 2 && bits != 4 ? 1 : 0;
+        faults += le64(record + 20) > self->size ||
+                  record_bytes(record) > self->size - le64(record + 20) ?
+                  1 : 0;
     }
     if (faults == 0) {
         const uint8_t * record = f + HEADER + 28 * 4 +

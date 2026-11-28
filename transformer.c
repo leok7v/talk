@@ -151,6 +151,10 @@ static void metadata_read(struct gguf * g, uint64_t count) {
     }
 }
 
+static size_t block_bytes(uint32_t type) {
+    return type == GGUF_Q4_0 ? 2 + GGUF_BLOCK / 2 : 2 + GGUF_BLOCK;
+}
+
 const uint8_t * gguf_info(struct gguf * g, const char * name, uint32_t * type,
                           uint64_t * count) {
     const uint8_t * p = g->infos;
@@ -170,12 +174,13 @@ const uint8_t * gguf_info(struct gguf * g, const char * name, uint32_t * type,
         }
         p = tail + 12;
     }
-    g->faults += found != NULL ? 0 : 1;
-    return found;
-}
-
-static size_t block_bytes(uint32_t type) {
-    return type == GGUF_Q4_0 ? 2 + GGUF_BLOCK / 2 : 2 + GGUF_BLOCK;
+    const size_t bytes = found == NULL ? 0 : *type == GGUF_F32 ?
+                         *count * 4 : *count / GGUF_BLOCK * block_bytes(*type);
+    const size_t at = found != NULL ? (size_t)(found - g->file) : 0;
+    const bool inside = found != NULL && at <= g->size &&
+                        bytes <= g->size - at;
+    g->faults += inside ? 0 : 1;
+    return inside ? found : NULL;
 }
 
 static void block_decode(float * out, const uint8_t * block, uint32_t type) {
@@ -266,7 +271,7 @@ void gguf_linear(struct gguf * g, float * y, const float * x,
     const struct gemm_args a = {
         .a = x, .b = decoded != NULL ? decoded : w->values, .c = y,
         .m = rows, .n = out, .k = in, .lda = in, .ldb = in, .ldc = out,
-        .tb = true
+        .tb = true, .fresh = true
     };
     const struct blocks b = {
         .codes = w->blocks, .scale = w->scale, .out = out, .in = in,
@@ -277,7 +282,6 @@ void gguf_linear(struct gguf * g, float * y, const float * x,
                     w->bits == 4 ? GGUF_Q4_0 : GGUF_Q8_0);
     }
     if (a.b != NULL && rows > 1) {
-        memset(y, 0, (size_t)rows * out * sizeof(float));
         g->backend->gemm(g->backend, &a);
     } else {
         for (int32_t r = 0; r < rows; r++) {
@@ -680,20 +684,16 @@ static void attend_rows(const struct attention * a, float * mix,
         const struct gemm_args scores = {
             .a = q + h * a->head, .b = a->keys + at, .c = score, .m = rows,
             .n = count, .k = a->head, .lda = wide,
-            .ldb = a->groups * a->head, .ldc = count, .tb = true
+            .ldb = a->groups * a->head, .ldc = count, .tb = true,
+            .fresh = true
         };
         const struct gemm_args mixed = {
             .a = score, .b = a->values + at, .c = mix + h * a->head,
             .m = rows, .n = a->head, .k = count, .lda = count,
-            .ldb = a->groups * a->head, .ldc = wide
+            .ldb = a->groups * a->head, .ldc = wide, .fresh = true
         };
-        memset(score, 0, (size_t)rows * count * sizeof(float));
         a->backend->gemm(a->backend, &scores);
         soften(a, score, first, rows);
-        for (int32_t r = 0; r < rows; r++) {
-            memset(mix + (size_t)r * wide + h * a->head, 0,
-                   (size_t)a->head * sizeof(float));
-        }
         a->backend->gemm(a->backend, &mixed);
     }
 }
