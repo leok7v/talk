@@ -22,7 +22,7 @@
 #define MASK  "vector_estimator.vector_estimator.tts.ttl.uncond_masker"
 #define AE    "vocoder.tts.ae"
 
-enum { name_capacity = 192, text_capacity = 1024, arena_floats = 1 << 26,
+enum { name_capacity = 192, text_capacity = 1024, arena_floats = 1 << 25,
        sample_rate = 44100, style_heads = 2, field_groups = 4,
        chunk_limit = 300, korean_chunk_limit = 120, sentence_limit = 0,
        span_capacity = 4096,
@@ -96,6 +96,7 @@ struct supertonic {
     struct pack      golden;
     struct profile * profile;
     float *          arena;
+    float **         wide;
     size_t           used;
     int32_t          taps;
     int32_t          failures;
@@ -107,6 +108,8 @@ struct condition {
     const float * keys;
     const float * values;
     int32_t       tokens;
+    const float * spin_x;
+    const float * spin_text;
     char          tag[16];
 };
 
@@ -407,7 +410,10 @@ static int64_t record_bytes(const struct record * record) {
     const int64_t blocks = (record->count / rows + q4_block - 1) / q4_block;
     const int64_t packed = (blocks + q4_group - 1) / q4_group * q4_head +
                            blocks * (q4_block / 2);
-    return record->bits == 4 ? rows * packed :
+    return record->bits >= 1000 ?
+           rows * (int64_t)weight_bytes(record->bits - 1000,
+                                        (int32_t)(record->count / rows)) :
+           record->bits == 4 ? rows * packed :
            record->bits == 16 ? 2 * record->count : record->count;
 }
 
@@ -628,6 +634,52 @@ static float * arena(struct supertonic * tts, int64_t count) {
     return data;
 }
 
+static void host(struct supertonic * tts) {
+    tts->backend->sync(tts->backend);
+}
+
+static void op(struct supertonic * tts, const struct map_args * m) {
+    tts->backend->map(tts->backend, m);
+}
+
+static void each(struct supertonic * tts, int32_t kind, float * y,
+                 const float * a, float alpha, int64_t n) {
+    const int64_t rows = n / 4096;
+    const int64_t rest = n % 4096;
+    const struct map_args whole = {
+        .y = y, .a = a, .op = kind, .alpha = alpha, .rows = (int32_t)rows,
+        .cols = 4096, .ys = { 0, 4096, 1 }, .as = { 0, 4096, 1 }
+    };
+    const struct map_args tail = {
+        .y = y + rows * 4096, .a = a != NULL ? a + rows * 4096 : NULL,
+        .op = kind, .alpha = alpha, .rows = 1, .cols = (int32_t)rest,
+        .ys = { 0, 0, 1 }, .as = { 0, 0, 1 }
+    };
+    if (rows > 0) {
+        op(tts, &whole);
+    }
+    if (rest > 0) {
+        op(tts, &tail);
+    }
+}
+
+static void added(struct supertonic * tts, float * y, float alpha,
+                  const float * x, int64_t n) {
+    each(tts, OP_ADD, y, x, alpha, n);
+}
+
+static void per_row(struct supertonic * tts, int32_t kind, float * y,
+                    const float * a, const float * b, int32_t rows,
+                    int32_t n) {
+    const struct map_args m = {
+        .y = y, .a = a, .b = b, .op = kind, .alpha = 1.0f, .rows = rows,
+        .cols = n,
+        .ys = { 0, n, 1 }, .as = { 0, b != NULL ? n : 1, b != NULL ? 1 : 0 },
+        .bs = { 0, 1, 0 }
+    };
+    op(tts, &m);
+}
+
 static void profile_add(struct supertonic * tts, double started,
                         const char * kernel, int32_t out, int32_t in,
                         int32_t taps, int32_t n) {
@@ -690,6 +742,7 @@ static void tap(struct supertonic * tts, const float * data, int64_t count,
                 const char * format, ...) {
     if (tts->golden.tensors != NULL) {
         char name[name_capacity];
+        host(tts);
         va_list arguments;
         va_start(arguments, format);
         vsnprintf(name, sizeof name, format, arguments);
@@ -718,10 +771,6 @@ static void fill(float * y, float value, int64_t n) {
     for (int64_t i = 0; i < n; i++) { y[i] = value; }
 }
 
-static void axpy(float * y, float a, const float * x, int64_t n) {
-    for (int64_t i = 0; i < n; i++) { y[i] += a * x[i]; }
-}
-
 static float dot(const float * a, int64_t a_stride, const float * b,
                  int64_t b_stride, int32_t n) {
     float sum = 0.0f;
@@ -739,22 +788,6 @@ static void matmul(struct supertonic * tts, float * y, const float * x,
         .lda = transposed ? co : ci, .ldb = n, .ldc = n, .ta = transposed
     };
     tts->backend->gemm(tts->backend, &g);
-}
-
-static void gelu_erf(struct supertonic * tts, float * e, const float * x,
-                     int32_t count) {
-    for (int32_t i = 0; i < count; i++) {
-        const float z = x[i] / 1.4142135f;
-        e[i] = -z * z;
-    }
-    tts->backend->exp(tts->backend, e, e, count);
-    for (int32_t i = 0; i < count; i++) {
-        const float t = 1.0f / (1.0f + 0.3275911f * fabsf(x[i] / 1.4142135f));
-        const float tail = ((((1.061405429f * t - 1.453152027f) * t +
-                              1.421413741f) * t - 0.284496736f) * t +
-                            0.254829592f) * t * e[i];
-        e[i] = copysignf(1.0f - tail, x[i]);
-    }
 }
 
 static void unpacked(float * wide, const uint8_t * slice, int64_t blocks) {
@@ -777,22 +810,18 @@ static void unpacked(float * wide, const uint8_t * slice, int64_t blocks) {
     }
 }
 
-static const float * widened(struct supertonic * tts, const struct tensor * w,
-                             int32_t from, int32_t size) {
+static void widen_into(struct supertonic * tts, const struct tensor * w,
+                       int32_t from, int32_t size, float * wide) {
     const int64_t slice = w->count / w->shape[0];
-    const float * result = w->data + from * slice;
     if (w->bits == 16) {
         const _Float16 * half = (const void *)w->data;
-        float * wide = arena(tts, size * slice);
         for (int64_t i = 0; i < size * slice; i++) {
             wide[i] = (float)half[from * slice + i];
         }
-        result = wide;
     } else if (w->bits == 8) {
         const int8_t * codes = (const void *)w->data;
         const float * scales = weight(&tts->weights, "%s.scale", w->name)
                                    ->data;
-        float * wide = arena(tts, size * slice);
         for (int64_t row = 0; row < size; row++) {
             const float    scale = scales[from + row];
             const int8_t * code = codes + (from + row) * slice;
@@ -800,20 +829,54 @@ static const float * widened(struct supertonic * tts, const struct tensor * w,
                 wide[row * slice + i] = scale * (float)code[i];
             }
         }
-        result = wide;
     } else if (w->bits == 4) {
         const int64_t blocks = (slice + q4_block - 1) / q4_block;
         const int64_t bytes = (blocks + q4_group - 1) / q4_group * q4_head +
                               blocks * (q4_block / 2);
         const uint8_t * packed = (const void *)w->data;
-        float * wide = arena(tts, size * slice + q4_block);
         for (int64_t row = 0; row < size; row++) {
             unpacked(wide + row * slice, packed + (from + row) * bytes,
                      blocks);
         }
+    }
+}
+
+static const float * cached(struct supertonic * tts, const struct tensor * w) {
+    const int64_t index = w - tts->weights.tensors;
+    if (tts->wide[index] == NULL) {
+        host(tts);
+        tts->wide[index] = tts->backend->alloc(tts->backend,
+                                               (size_t)w->count + q4_block);
+        widen_into(tts, w, 0, w->shape[0], tts->wide[index]);
+    }
+    return tts->wide[index];
+}
+
+static const float * widened(struct supertonic * tts, const struct tensor * w,
+                             int32_t from, int32_t size) {
+    const int64_t slice = w->count / w->shape[0];
+    const bool queued = tts->backend->queued && w->bits != 0;
+    const float * result = queued ? cached(tts, w) + from * slice :
+                           w->data + from * slice;
+    if (!queued && w->bits != 0) {
+        float * wide = arena(tts, size * slice + q4_block);
+        widen_into(tts, w, from, size, wide);
         result = wide;
     }
     return result;
+}
+
+static void packed(struct supertonic * tts, float * y, const float * x,
+                   int32_t n, const struct tensor * w, bool fresh) {
+    const int32_t rows = w->shape[0];
+    const int32_t slice = (int32_t)(w->count / rows);
+    const int32_t format = w->bits - 1000;
+    const struct gemm_args g = {
+        .a = x, .b = w->data, .c = y, .m = n, .n = rows, .k = slice,
+        .lda = n, .ldb = (int32_t)weight_bytes(format, slice), .ldc = n,
+        .ta = true, .tb = true, .tc = true, .fresh = fresh, .format = format
+    };
+    tts->backend->gemm(tts->backend, &g);
 }
 
 static void product(struct supertonic * tts, float * y, const float * x,
@@ -823,12 +886,18 @@ static void product(struct supertonic * tts, float * y, const float * x,
     const int32_t slice = (int32_t)(w->count / rows);
     const int32_t co = transposed ? slice : rows;
     const int32_t fit = widen_floats / slice / 4 * 4;
-    const int32_t block = w->bits == 0 ? rows : fit < 4 ? 4 : fit;
+    const int32_t block = w->bits == 0 || tts->backend->queued ? rows :
+                          fit < 4 ? 4 : fit;
     const size_t  mark = tts->used;
-    for (int32_t o = 0; o < co; o++) {
-        fill(y + (int64_t)o * n, bias != NULL ? bias->data[o] : 0.0f, n);
+    if (bias != NULL) {
+        per_row(tts, OP_COPY, y, bias->data, NULL, co, n);
+    } else if (w->bits < 1000) {
+        each(tts, OP_FILL, y, NULL, 0.0f, (int64_t)co * n);
     }
-    for (int32_t from = 0; from < rows; from += block) {
+    if (w->bits >= 1000) {
+        packed(tts, y, x, n, w, bias == NULL);
+    }
+    for (int32_t from = 0; w->bits < 1000 && from < rows; from += block) {
         const int32_t size = rows - from < block ? rows - from : block;
         const float * part = widened(tts, w, from, size);
         if (transposed) {
@@ -847,17 +916,29 @@ static const float * unfolded(struct supertonic * tts, const float * x,
     const int32_t span = dilation * (k - 1);
     const int32_t left = causal ? span : span / 2;
     float * taps = arena(tts, (int64_t)ci * k * n);
-    for (int64_t row = 0; row < (int64_t)ci * k; row++) {
-        const float * channel = x + row / k * n;
-        const int64_t shift = row % k * dilation - left;
+    for (int32_t kk = 0; kk < k; kk++) {
+        const int64_t shift = (int64_t)kk * dilation - left;
         const int64_t head = shift > 0 ? 0 : -shift < n ? -shift : n;
         const int64_t tail = shift < 0 ? 0 : shift < n ? shift : n;
-        float * out = taps + row * n;
-        fill(out, channel[0], head);
-        for (int64_t t = head; t < n - tail; t++) {
-            out[t] = channel[t + shift];
-        }
-        fill(out + n - tail, channel[n - 1], tail);
+        const int64_t body = n - head - tail;
+        float * out = taps + (int64_t)kk * n;
+        const struct map_args first = {
+            .y = out, .a = x, .op = OP_COPY, .rows = ci, .cols = (int32_t)head,
+            .ys = { 0, (int64_t)k * n, 1 }, .as = { 0, n, 0 }
+        };
+        const struct map_args middle = {
+            .y = out + head, .a = body > 0 ? x + head + shift : x,
+            .op = OP_COPY, .rows = ci, .cols = (int32_t)body,
+            .ys = { 0, (int64_t)k * n, 1 }, .as = { 0, n, 1 }
+        };
+        const struct map_args last = {
+            .y = out + n - tail, .a = x + n - 1, .op = OP_COPY, .rows = ci,
+            .cols = (int32_t)tail, .ys = { 0, (int64_t)k * n, 1 },
+            .as = { 0, n, 0 }
+        };
+        op(tts, &first);
+        op(tts, &middle);
+        op(tts, &last);
     }
     return taps;
 }
@@ -873,10 +954,14 @@ static void conv(struct supertonic * tts, float * y, const float * x,
     const float * taps = k == 1 ? x : unfolded(tts, x, ci, n, k, dilation,
                                                causal);
     if (depthwise) {
-        for (int64_t i = 0; i < (int64_t)co * k; i++) {
-            float * row = y + i / k * n;
-            if (i % k == 0) { fill(row, bias->data[i / k], n); }
-            axpy(row, w->data[i], taps + i * n, n);
+        per_row(tts, OP_COPY, y, bias->data, NULL, co, n);
+        for (int32_t kk = 0; kk < k; kk++) {
+            const struct map_args m = {
+                .y = y, .a = taps + (int64_t)kk * n, .b = w->data + kk,
+                .op = OP_FMA, .rows = co, .cols = n, .ys = { 0, n, 1 },
+                .as = { 0, (int64_t)k * n, 1 }, .bs = { 0, k, 0 }
+            };
+            op(tts, &m);
         }
     } else {
         product(tts, y, taps, n, w, bias, false);
@@ -898,52 +983,24 @@ static void project(struct supertonic * tts, float * y, const float * x,
 static void layer_norm(struct supertonic * tts, float * x, int32_t c,
                        int32_t n, const struct tensor * gain,
                        const struct tensor * bias) {
-    const size_t mark = tts->used;
     const double started = seconds();
-    float * mean = arena(tts, n);
-    float * scale = arena(tts, n);
-    fill(mean, 0.0f, n);
-    fill(scale, 0.0f, n);
-    for (int32_t i = 0; i < c; i++) {
-        axpy(mean, 1.0f, x + (int64_t)i * n, n);
-    }
-    for (int32_t t = 0; t < n; t++) { mean[t] /= (float)c; }
-    for (int32_t i = 0; i < c; i++) {
-        for (int32_t t = 0; t < n; t++) {
-            const float d = x[(int64_t)i * n + t] - mean[t];
-            scale[t] += d * d;
-        }
-    }
-    for (int32_t t = 0; t < n; t++) {
-        scale[t] = 1.0f / sqrtf(scale[t] / (float)c + layer_norm_epsilon);
-    }
-    for (int32_t i = 0; i < c; i++) {
-        float * row = x + (int64_t)i * n;
-        for (int32_t t = 0; t < n; t++) {
-            row[t] = (row[t] - mean[t]) * scale[t] * gain->data[i] +
-                     bias->data[i];
-        }
-    }
-    tts->used = mark;
+    const struct norm_args a = {
+        .y = x, .x = x, .w = gain->data, .b = bias->data, .rows = n, .n = c,
+        .eps = layer_norm_epsilon, .ld = 1, .step = n
+    };
+    tts->backend->norm(tts->backend, &a);
     profile_add(tts, started, "layer norm", c, 1, 1, n);
 }
 
 static void gelu(struct supertonic * tts, float * x, int32_t c, int32_t n) {
-    const size_t mark = tts->used;
     const double started = seconds();
-    float * e = arena(tts, (int64_t)c * n);
-    gelu_erf(tts, e, x, c * n);
-    for (int64_t i = 0; i < (int64_t)c * n; i++) {
-        x[i] = x[i] * (e[i] + 1.0f) * 0.5f;
-    }
-    tts->used = mark;
+    each(tts, OP_GELU, x, x, 0.0f, (int64_t)c * n);
     profile_add(tts, started, "gelu", c, 1, 1, n);
 }
 
-static void prelu(float * x, int64_t n, float slope) {
-    for (int64_t i = 0; i < n; i++) {
-        x[i] = x[i] < 0.0f ? x[i] * slope : x[i];
-    }
+static void prelu(struct supertonic * tts, float * x, int64_t n,
+                  float slope) {
+    each(tts, OP_PRELU, x, x, slope, n);
 }
 
 static void softmax(float * x, int32_t n) {
@@ -988,9 +1045,8 @@ static float * convnext(struct supertonic * tts, const float * x, int32_t c,
     gelu(tts, z, wide, n);
     conv(tts, y, z, wide, n, weight(w, "%s.pwconv2.weight", at),
          weight(w, "%s.pwconv2.bias", at), 1, false);
-    for (int64_t i = 0; i < (int64_t)c * n; i++) {
-        y[i] = x[i] + gamma->data[i / n] * y[i];
-    }
+    per_row(tts, OP_MUL, y, y, gamma->data, c, n);
+    added(tts, y, 1.0f, x, (int64_t)c * n);
     tts->used = mark;
     return y;
 }
@@ -1056,7 +1112,8 @@ static void relative_attention(struct supertonic * tts, float * y,
          weight(w, "%s.conv_k.bias", at), 1, false);
     conv(tts, v, x, c, n, weight(w, "%s.conv_v.weight", at),
          weight(w, "%s.conv_v.bias", at), 1, false);
-    for (int64_t i = 0; i < size; i++) { q[i] /= sqrtf((float)d); }
+    each(tts, OP_SCALE, q, q, 1.0f / sqrtf((float)d), size);
+    host(tts);
     const double started = seconds();
     for (int32_t h = 0; h < c / d; h++) {
         const int64_t base = (int64_t)h * d * n;
@@ -1079,7 +1136,7 @@ static void feed_forward(struct supertonic * tts, float * y, const float * x,
     const size_t          mark = tts->used;
     float * h = arena(tts, (int64_t)wide * n);
     conv(tts, h, x, c, n, w1, weight(w, "%s.conv_1.bias", at), 1, false);
-    prelu(h, (int64_t)wide * n, 0.0f);
+    prelu(tts, h, (int64_t)wide * n, 0.0f);
     conv(tts, y, h, wide, n, weight(w, "%s.conv_2.weight", at),
          weight(w, "%s.conv_2.bias", at), 1, false);
     tts->used = mark;
@@ -1097,12 +1154,12 @@ static float * encoder(struct supertonic * tts, float * x, int32_t c,
     x = stack(tts, x, c, n, dilations, false, name, blocks);
     float * h = arena(tts, size);
     float * y = arena(tts, size);
-    memcpy(h, x, (size_t)size * sizeof(float));
+    each(tts, OP_COPY, h, x, 0.0f, size);
     for (int32_t i = 0;
          has(w, "%s.attn_encoder.attn_layers.%d.emb_rel_k", at, i); i++) {
         snprintf(name, sizeof name, "%s.attn_encoder.attn_layers.%d", at, i);
         relative_attention(tts, y, h, c, n, name);
-        axpy(h, 1.0f, y, size);
+        added(tts, h, 1.0f, y, size);
         snprintf(name, sizeof name, "%s.attn_encoder.norm_layers_1.%d.norm",
                  at, i);
         layer_norm(tts, h, c, n, weight(w, "%s.weight", name),
@@ -1110,14 +1167,14 @@ static float * encoder(struct supertonic * tts, float * x, int32_t c,
         tap(tts, h, size, "%s.attn.%d.mid", tag, i);
         snprintf(name, sizeof name, "%s.attn_encoder.ffn_layers.%d", at, i);
         feed_forward(tts, y, h, c, n, name);
-        axpy(h, 1.0f, y, size);
+        added(tts, h, 1.0f, y, size);
         snprintf(name, sizeof name, "%s.attn_encoder.norm_layers_2.%d.norm",
                  at, i);
         layer_norm(tts, h, c, n, weight(w, "%s.weight", name),
                    weight(w, "%s.bias", name));
         tap(tts, h, size, "%s.attn.%d", tag, i);
     }
-    axpy(h, 1.0f, x, size);
+    added(tts, h, 1.0f, x, size);
     return h;
 }
 
@@ -1147,19 +1204,22 @@ static float duration(struct supertonic * tts, const int32_t * ids,
     float * in = arena(tts, first->shape[1]);
     float * hidden = arena(tts, first->shape[0]);
     float   out = 0.0f;
+    host(tts);
     for (int32_t i = 0; i < c; i++) { x[(int64_t)i * n] = token->data[i]; }
     embed(x + 1, n, table, ids, count);
     tap(tts, x, (int64_t)c * n, "dp.embed");
     float * h = encoder(tts, x, c, n, NULL, "dp", DP ".sentence_encoder");
+    host(tts);
     for (int32_t i = 0; i < c; i++) { hidden[i] = h[(int64_t)i * n]; }
     conv(tts, in, hidden, c, 1,
          weight(w, DP ".sentence_encoder.proj_out.net.weight"), NULL, 1,
          false);
     tap(tts, in, c, "dp.sentence");
+    host(tts);
     memcpy(in + c, style, (size_t)(first->shape[1] - c) * sizeof(float));
     conv(tts, hidden, in, first->shape[1], 1, first,
          weight(w, DP ".predictor.layers.0.bias"), 1, false);
-    prelu(hidden, first->shape[0],
+    prelu(tts, hidden, first->shape[0],
           weight(w, DP ".predictor.activation.weight")->data[0]);
     conv(tts, &out, hidden, first->shape[0], 1,
          weight(w, DP ".predictor.layers.1.weight"),
@@ -1174,24 +1234,20 @@ static void attend(struct supertonic * tts, float * y, const float * q,
     const int32_t d = c / heads;
     const size_t  mark = tts->used;
     const double  started = seconds();
-    float * p = arena(tts, m);
-    float * o = arena(tts, d);
-    const float * columns = transposed(tts, v, c, m);
+    float * s = arena(tts, (int64_t)n * m);
     for (int32_t h = 0; h < heads; h++) {
         const int64_t base = (int64_t)h * d;
-        for (int32_t i = 0; i < n; i++) {
-            fill(p, 0.0f, m);
-            fill(o, 0.0f, d);
-            for (int32_t e = 0; e < d; e++) {
-                axpy(p, q[(base + e) * n + i], k + (base + e) * m, m);
-            }
-            for (int32_t j = 0; j < m; j++) { p[j] /= scale; }
-            softmax(p, m);
-            for (int32_t j = 0; j < m; j++) {
-                axpy(o, p[j], columns + (int64_t)j * c + base, d);
-            }
-            for (int32_t e = 0; e < d; e++) { y[(base + e) * n + i] = o[e]; }
-        }
+        const struct gemm_args scores = {
+            .a = q + base * n, .b = k + base * m, .c = s, .m = n, .n = m,
+            .k = d, .lda = n, .ldb = m, .ldc = m, .ta = true, .fresh = true
+        };
+        const struct gemm_args mixed = {
+            .a = v + base * m, .b = s, .c = y + base * n, .m = d, .n = n,
+            .k = m, .lda = m, .ldb = m, .ldc = n, .tb = true, .fresh = true
+        };
+        tts->backend->gemm(tts->backend, &scores);
+        tts->backend->softmax(tts->backend, s, n, m, 1.0f / scale, 0);
+        tts->backend->gemm(tts->backend, &mixed);
     }
     tts->used = mark;
     profile_add(tts, started, "attend", c, m, 2, n);
@@ -1217,7 +1273,7 @@ static void style_attention(struct supertonic * tts, float * y,
     project(tts, v,condition->values, m,
             weight(w, "%s.W_value.linear.weight", at),
             weight(w, "%s.W_value.linear.bias", at));
-    for (int64_t i = 0; i < (int64_t)c * m; i++) { k[i] = tanhf(k[i]); }
+    each(tts, OP_TANH, k, k, 0.0f, (int64_t)c * m);
     attend(tts, o, q, n, k, v, m, c, style_heads,
            sqrtf((float)wk->shape[0]));
     project(tts, y, o, n,weight(w, "%s.out_fc.linear.weight", at),
@@ -1236,17 +1292,18 @@ static float * text_encoder(struct supertonic * tts, const int32_t * ids,
     const size_t mark = tts->used;
     float * x = arena(tts, size);
     float * y = arena(tts, size);
+    host(tts);
     embed(x, n, table, ids, n);
     float * e = encoder(tts, x, c, n, encoder_dilations, "te",
                         TE ".text_encoder");
     tap(tts, e, size, "te.encoded");
     style_attention(tts, y, e, n, condition,
                     TE ".speech_prompted_text_encoder.attention1");
-    axpy(y, 1.0f, e, size);
+    added(tts, y, 1.0f, e, size);
     tap(tts, y, size, "te.style.1");
     style_attention(tts, emb, y, n, condition,
                     TE ".speech_prompted_text_encoder.attention2");
-    axpy(emb, 1.0f, e, size);
+    added(tts, emb, 1.0f, e, size);
     layer_norm(tts, emb, c, n,
                weight(w, TE ".speech_prompted_text_encoder.norm.norm.weight"),
                weight(w, TE ".speech_prompted_text_encoder.norm.norm.bias"));
@@ -1264,12 +1321,14 @@ static void time_embedding(struct supertonic * tts, float * out, float t) {
     const size_t          mark = tts->used;
     float * waves = arena(tts, 2 * half);
     float * h = arena(tts, wide);
+    host(tts);
     for (int32_t i = 0; i < half; i++) {
         waves[i] = sinf(t * time_scale * freqs[i]);
         waves[half + i] = cosf(t * time_scale * freqs[i]);
     }
     conv(tts, h, waves, 2 * half, 1, w0,
          weight(w, FIELD ".time_encoder.mlp.0.linear.bias"), 1, false);
+    host(tts);
     for (int32_t i = 0; i < wide; i++) {
         h[i] = h[i] * tanhf(log1pf(expf(h[i])));
     }
@@ -1279,22 +1338,30 @@ static void time_embedding(struct supertonic * tts, float * out, float t) {
     tts->used = mark;
 }
 
+static const float * spins(struct supertonic * tts, int32_t n) {
+    const struct tensor * theta = weight(&tts->weights, FIELD ".main_blocks.3"
+                                         ".attn.theta");
+    const int32_t half = (int32_t)theta->count;
+    float * table = arena(tts, (int64_t)half * n * 2);
+    for (int64_t i = 0; i < (int64_t)half * n; i++) {
+        const int32_t t = (int32_t)(i % n);
+        const float angle = (float)t / (float)n * theta->data[i / n];
+        table[2 * i] = cosf(angle);
+        table[2 * i + 1] = sinf(angle);
+    }
+    return table;
+}
+
 static void rotate(struct supertonic * tts, float * x, int32_t c, int32_t n,
-                   const struct tensor * theta) {
+                   const struct tensor * theta, const float * table) {
     const int32_t half = (int32_t)theta->count;
     const double  started = seconds();
-    for (int64_t i = 0; i < (int64_t)c / 2 * n; i++) {
-        const int64_t pair = i / n;
-        const int32_t t = (int32_t)(i % n);
-        float * a = x + (pair / half * 2 * half + pair % half) * n + t;
-        float * b = a + (int64_t)half * n;
-        const float angle = (float)t / (float)n * theta->data[pair % half];
-        const float sine = sinf(angle);
-        const float cosine = cosf(angle);
-        const float real = *a * cosine - *b * sine;
-        *b = *a * sine + *b * cosine;
-        *a = real;
-    }
+    const struct map_args m = {
+        .y = x, .a = table, .op = OP_ROPE, .batch = c / (2 * half),
+        .rows = half, .cols = n, .ys = { 2 * (int64_t)half * n, n, 1 },
+        .as = { 0, 2 * (int64_t)n, 2 }, .pair = (int64_t)half * n
+    };
+    op(tts, &m);
     profile_add(tts, started, "rotate", c, 1, 1, n);
 }
 
@@ -1319,12 +1386,12 @@ static void text_condition(struct supertonic * tts, float * x, int32_t c,
     project(tts, v,condition->text, m,
             weight(w, "%s.attn.W_value.linear.weight", at),
             weight(w, "%s.attn.W_value.linear.bias", at));
-    rotate(tts, q, c, n, theta);
-    rotate(tts, k, c, m, theta);
+    rotate(tts, q, c, n, theta, condition->spin_x);
+    rotate(tts, k, c, m, theta, condition->spin_text);
     attend(tts, o, q, n, k, v, m, c, heads, sqrtf((float)wk->shape[0]));
     project(tts, q,o, n, weight(w, "%s.attn.out_fc.linear.weight", at),
             weight(w, "%s.attn.out_fc.linear.bias", at));
-    axpy(x, 1.0f, q, (int64_t)c * n);
+    added(tts, x, 1.0f, q, (int64_t)c * n);
     tts->used = mark;
 }
 
@@ -1344,7 +1411,7 @@ static float * field_block(struct supertonic * tts, float * x, int32_t c,
         project(tts, shift, time, 1,
                 weight(w, "%s.linear.linear.weight", at),
                 weight(w, "%s.linear.linear.bias", at));
-        for (int64_t i = 0; i < (int64_t)c * n; i++) { x[i] += shift[i / n]; }
+        per_row(tts, OP_ADD, x, shift, NULL, c, n);
         tts->used = mark;
     } else {
         if (block % 6 == 3) {
@@ -1353,7 +1420,7 @@ static float * field_block(struct supertonic * tts, float * x, int32_t c,
             float * styled = arena(tts, (int64_t)c * n);
             snprintf(at, sizeof at, FIELD ".main_blocks.%d.attention", block);
             style_attention(tts, styled, x, n, condition, at);
-            axpy(x, 1.0f, styled, (int64_t)c * n);
+            added(tts, x, 1.0f, styled, (int64_t)c * n);
             tts->used = mark;
         }
         snprintf(at, sizeof at, FIELD ".main_blocks.%d", block);
@@ -1404,10 +1471,8 @@ static void flow(struct supertonic * tts, float * x, int64_t size, int32_t n,
         tap(tts, time, out->shape[0], "ve.%d.time", step);
         const float * with = velocity(tts, x, n, time, spoken);
         const float * without = velocity(tts, x, n, time, silent);
-        for (int64_t i = 0; i < size; i++) {
-            x[i] += 1.0f / (float)steps * (with[i] * (1.0f + guidance) -
-                                            without[i] * guidance);
-        }
+        added(tts, x, (1.0f + guidance) / (float)steps, with, size);
+        added(tts, x, -guidance / (float)steps, without, size);
         tap(tts, x, size, "ve.step.%d", step);
         tts->used = mark;
     }
@@ -1429,6 +1494,7 @@ static const float * vocoder_head(struct supertonic * tts, float * x,
     float * y = arena(tts, (int64_t)last->shape[0] * n);
     const size_t mark = tts->used;
     float * h = arena(tts, (int64_t)wide * n);
+    host(tts);
     for (int64_t i = 0; i < (int64_t)c * n; i++) {
         const int64_t at = i / n;
         x[i] = (x[i] - shift[at]) / sqrtf(spread[at] + batch_norm_epsilon) *
@@ -1437,7 +1503,7 @@ static const float * vocoder_head(struct supertonic * tts, float * x,
     if (tapped) { tap(tts, x, (int64_t)c * n, "voc.norm"); }
     conv(tts, h, x, c, n, head, weight(w, AE ".decoder.head.layer1.net.bias"),
          1, true);
-    prelu(h, (int64_t)wide * n,
+    prelu(tts, h, (int64_t)wide * n,
           weight(w, AE ".decoder.head.act.weight")->data[0]);
     conv(tts, y, h, wide, n, last, NULL, 1, false);
     tts->used = mark;
@@ -1472,6 +1538,7 @@ static void vocoder_span(struct supertonic * tts, float * wav,
     const size_t  mark = tts->used;
     float * z = arena(tts, (int64_t)ld * n);
     float * x = arena(tts, (int64_t)c * n);
+    host(tts);
     for (int64_t i = 0; i < (int64_t)ld * n; i++) {
         const int64_t t = start + i % n;
         z[i] = latent[(i / n * factor + t % factor) * frames + t / factor] /
@@ -1484,6 +1551,7 @@ static void vocoder_span(struct supertonic * tts, float * wav,
     x = stack(tts, x, c, n, vocoder_dilations, true,
               tapped ? "voc.convnext" : NULL, AE ".decoder");
     const float * y = vocoder_head(tts, x, c, n, tapped);
+    host(tts);
     for (int64_t i = (int64_t)from * hop; i < (int64_t)to * hop; i++) {
         wav[i] = y[i % hop * n + i / hop - start];
     }
@@ -1564,6 +1632,7 @@ static struct audio render(struct supertonic * tts, const int32_t * ids,
         weight(w, AE ".decoder.head.layer2.weight")->shape[0] * rows /
         weight(w, AE ".decoder.embed.net.weight")->shape[1];
     const int32_t m = voice->tokens;
+    host(tts);
     tap_bytes(tts, "text.ids", ids, (size_t)n * sizeof(int32_t),
               sizeof(int32_t));
     struct condition spoken = {
@@ -1582,6 +1651,11 @@ static struct audio render(struct supertonic * tts, const int32_t * ids,
     const int32_t frames = (int32_t)(
         (seconds * (float)sample_rate + (float)chunk - 1.0f) / (float)chunk);
     float * x = arena(tts, (int64_t)rows * frames);
+    host(tts);
+    spoken.spin_x = spins(tts, frames);
+    spoken.spin_text = spins(tts, n);
+    silent.spin_x = spoken.spin_x;
+    silent.spin_text = spoken.spin_text;
     for (int64_t i = 0; i < (int64_t)rows * frames; i++) {
         x[i] = (float)mt_gauss(mt);
     }
@@ -1752,11 +1826,18 @@ static uint8_t * supertonic_wave(struct tts * handle, const char * text,
 
 static void supertonic_close(struct tts * handle) {
     struct supertonic * tts = (struct supertonic *)handle;
-    free(tts->weights.tensors);
-    file_unmap(tts->weights.map, tts->weights.size);
     free(tts->golden.tensors);
     file_unmap(tts->golden.map, tts->golden.size);
-    free(tts->arena);
+    for (int64_t i = 0; tts->wide != NULL && i < tts->weights.count; i++) {
+        tts->backend->release(tts->backend, tts->wide[i]);
+    }
+    free(tts->wide);
+    tts->backend->release(tts->backend, tts->arena);
+    free(tts->weights.tensors);
+    if (tts->weights.map != NULL) {
+        tts->backend->adopt(tts->backend, tts->weights.map, 0);
+    }
+    file_unmap(tts->weights.map, tts->weights.size);
     free(tts);
 }
 
@@ -1777,10 +1858,13 @@ static struct tts * supertonic_open(const char * path,
         tts->speed = (float)strtod(option(options, "speed", "1.05"), NULL);
         tts->weights = pack_open(path);
         tts->weights.trap = &tts->trap;
-        tts->arena = malloc((size_t)arena_floats * sizeof(float));
+        tts->wide = calloc((size_t)tts->weights.count + 1, sizeof(float *));
+        tts->arena = backend->alloc(backend, (size_t)arena_floats);
+        backend->adopt(backend, tts->weights.map, tts->weights.size);
     }
     const bool ready = tts != NULL && tts->weights.tensors != NULL &&
-                       tts->arena != NULL && tts->steps > 0 &&
+                       tts->arena != NULL && tts->wide != NULL &&
+                       tts->steps > 0 &&
                        tts->speed > 0.0f;
     if (!ready && tts != NULL) {
         supertonic_close(&tts->tts);

@@ -156,6 +156,12 @@ static void wav_test(void) {
     free(samples);
     expect(wav_samples((const uint8_t *)"not a wav file", 14, &samples) == 0 &&
            samples == NULL, "wav bad");
+    wav_head(w, 0, 16000, 8);
+    expect(wav_samples(w, 52, &samples) == 0 && samples == NULL,
+           "wav of no channel");
+    wav_head(w, 1, 0, 8);
+    expect(wav_samples(w, 52, &samples) == 0 && samples == NULL,
+           "wav of no rate");
 }
 
 static void path_test(void) {
@@ -400,6 +406,39 @@ static void stop_test(void) {
     chat_close(&c);
 }
 
+static void spoken(struct chat * c, int32_t tokens) {
+    chat_begin(c);
+    for (int32_t i = 0; i < tokens; i++) {
+        chat_token(c, i);
+    }
+}
+
+static void cut_test(void) {
+    static struct chat c;
+    struct fake f = { .ordered = true };
+    const struct store store = { .state_size = sizeof f.next };
+    struct turn turn = { .limit = 16, .shift = SHIFT_EXACT };
+    must(chat_open(fake_chat(&c, &f), 256, &store), "chat");
+    chat_clear(&c);
+    spoken(&c, 10);
+    chat_want(&c, MARK_SYSTEM);
+    spoken(&c, 20);
+    spoken(&c, 20);
+    spoken(&c, 400);
+    expect(!chat_fit(&c, &turn, 2) && turn.full && c.pending_count == 450,
+           "a message over the context does not fit after a cut");
+    chat_clear(&c);
+    spoken(&c, 10);
+    spoken(&c, 20);
+    chat_rewind(&c, 0);
+    expect(c.pending_count == 30 && c.start_count == 2,
+           "a rewind of no message");
+    chat_rewind(&c, 1);
+    expect(c.pending_count == 10 && c.start_count == 1,
+           "a rewind of 1 message");
+    chat_close(&c);
+}
+
 static void feed_test(void) {
     static struct chat c;
     struct fake f = { .ordered = true };
@@ -497,6 +536,7 @@ int main(void) {
     backends_test();
     feed_test();
     stop_test();
+    cut_test();
     attend_test("cpu");
     attend_test("blas");
     printf("test: %s, %d checks, %d faults\n", faults == 0 ? "PASS" : "FAIL",

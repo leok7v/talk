@@ -9,7 +9,8 @@ SS       = ss
 
 FLAGS_Darwin = -fobjc-arc
 FLAGS_Linux  = -D_GNU_SOURCE -I/usr/include/openblas
-LIBS_Darwin  = -framework Accelerate -framework Metal -framework Foundation
+LIBS_Darwin  = -framework Accelerate -framework Metal -framework Foundation \
+               -framework MetalPerformanceShaders
 LIBS_hip     = -L$(ROCM)/lib -lamdhip64 -Wl,-rpath,$(ROCM)/lib -lstdc++
 LIBS_Linux   = -lopenblas -lgomp -lm $(LIBS_$(HIP))
 CC      = clang -std=c2x -O3 -flto -march=native -Wall -Wextra -Wpedantic \

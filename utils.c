@@ -10,7 +10,7 @@
 #include <time.h>
 #include <unistd.h>
 
-enum { RATE = 16000 };
+enum { RATE = 16000, LOWEST = 4000 };
 
 static _Thread_local jmp_buf * trap;
 static _Thread_local const char * failed;
@@ -366,7 +366,9 @@ int32_t wav_samples(const uint8_t * data, size_t size, float ** samples) {
         const size_t body = wav_chunk(data, size, "data", &bytes);
         if (format != 0 && body != 0 && head >= 16 &&
             (data[format] | data[format + 1] << 8) == 1 &&
-            (data[format + 14] | data[format + 15] << 8) == 16) {
+            (data[format + 14] | data[format + 15] << 8) == 16 &&
+            (data[format + 2] | data[format + 3] << 8) > 0 &&
+            le32(data + format + 4) >= LOWEST) {
             const int32_t channels = data[format + 2] | data[format + 3] << 8;
             const double rate = (double)le32(data + format + 4);
             const size_t frames = bytes / (size_t)(channels * 2);

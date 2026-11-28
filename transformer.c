@@ -489,7 +489,8 @@ static int32_t encode(const struct gguf * g, const char * s, int32_t * out,
         int32_t size = 0;
         while (at < stop) {
             const int32_t end = word_end(s, at, g->digits);
-            const int32_t cut = end < stop ? end : stop;
+            const int32_t far = end < stop ? end : stop;
+            const int32_t cut = far - at > WORD ? at + WORD : far;
             word_encode(g, s + at, cut - at, &to);
             at = cut;
         }
@@ -1013,7 +1014,7 @@ void chat_took(struct chat * c, int32_t token) {
 void chat_rewind(struct chat * c, int32_t messages) {
     const int32_t kept = c->start_count > messages ?
                          c->start_count - messages : 0;
-    if (c->start_count > 0) {
+    if (messages > 0 && c->start_count > 0) {
         c->pending_count = c->starts[kept];
         c->start_count = kept;
     }
@@ -1155,9 +1156,10 @@ bool chat_fit(struct chat * c, struct turn * turn, int32_t head) {
     const bool soft = turn->shift == SHIFT_SOFT && count > 0 &&
                       system->position == keep &&
                       fed_through(c, keep + count);
+    const bool over = c->pending_count - count + need > c->context;
     turn->dropped = 0;
     turn->full = c->overflow ||
-                 (tight && (turn->shift == SHIFT_NONE || count == 0));
+                 (tight && (turn->shift == SHIFT_NONE || over));
     if (tight && !turn->full && count > 0) {
         if (soft) {
             fed_cut(c, keep, count);

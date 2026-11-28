@@ -25,6 +25,7 @@ static const char * const system_prompt =
 static pthread_mutex_t asr_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t llm_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t tts_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct asr * engines[engines_limit];
 static int32_t lead;
 static struct backend * backend;
@@ -56,6 +57,10 @@ struct request {
 };
 
 static struct page page;
+
+static pthread_mutex_t * lock_of(pthread_mutex_t * role) {
+    return backend->queued ? &queue_lock : role;
+}
 
 static void log_request(const char * method, const char * path,
                         int status, long long bytes) {
@@ -375,9 +380,9 @@ static int handle_speak(int fd, const struct request * request) {
         send_json_error(fd, 400, "unknown voice");
     } else {
         size_t bytes = 0;
-        pthread_mutex_lock(&tts_lock);
+        pthread_mutex_lock(lock_of(&tts_lock));
         uint8_t * wave = tts->wave(tts, text, voice, &bytes);
-        pthread_mutex_unlock(&tts_lock);
+        pthread_mutex_unlock(lock_of(&tts_lock));
         if (wave == NULL) {
             status = 502;
             send_json_error(fd, 502, "speech backend failed");
@@ -470,14 +475,14 @@ static bool transcribe_with(struct bytes * json, int32_t index,
                             const char * language, char * main) {
     char transcript[text_limit];
     char tail[48];
-    pthread_mutex_lock(&asr_lock);
+    pthread_mutex_lock(lock_of(&asr_lock));
     struct asr * asr = engine_at(index);
     const double started = seconds();
     if (asr != NULL) {
         asr->transcribe(asr, samples, count, language, transcript,
                         sizeof transcript, NULL, NULL, NULL);
     }
-    pthread_mutex_unlock(&asr_lock);
+    pthread_mutex_unlock(lock_of(&asr_lock));
     if (asr != NULL) {
         snprintf(tail, sizeof tail, "\",\"seconds\":%.2f}",
                  seconds() - started);
@@ -665,7 +670,7 @@ static int32_t chat_turn(const struct request * request, const char * text,
     const int32_t index = query_get(request->query, "llm", word, sizeof word) ?
                           chat_index(word) : chat_lead;
     int32_t made = -1;
-    pthread_mutex_lock(&llm_lock);
+    pthread_mutex_lock(lock_of(&llm_lock));
     llm = chat_at(index);
     if (llm != NULL) {
         if (query_get(request->query, "rewind", word, sizeof word)) {
@@ -677,7 +682,7 @@ static int32_t chat_turn(const struct request * request, const char * text,
         llm->message(llm, "user", text);
         made = llm->reply(llm, answer, text_limit, turn);
     }
-    pthread_mutex_unlock(&llm_lock);
+    pthread_mutex_unlock(lock_of(&llm_lock));
     return made;
 }
 
